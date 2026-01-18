@@ -142,13 +142,10 @@ class AutomationToolGUI:
 
         export_frame = ttk.LabelFrame(bottom_frame, text=" Export ", padding=5)
         export_frame.pack(side="left", fill="y", padx=10)
-        mb_export = ttk.Menubutton(export_frame, text="💾 Export Data")
-        menu_export = tk.Menu(mb_export, tearoff=0)
-        menu_export.add_command(label="Export Success", command=lambda: self.export_data("Success"))
-        menu_export.add_command(label="Export Failed", command=lambda: self.export_data("Fail"))
-        menu_export.add_command(label="Export All", command=lambda: self.export_data("All"))
-        mb_export.config(menu=menu_export)
-        mb_export.pack(side="left", padx=5)
+        ttk.Button(export_frame, text="💾 Export Success", command=lambda: self.export_data("Success")).pack(side="left", padx=5)
+        ttk.Button(export_frame, text="💾 Export Failed", command=lambda: self.export_data("Fail")).pack(side="left", padx=5)
+        ttk.Button(export_frame, text="💾 Export All", command=lambda: self.export_data("All")).pack(side="left", padx=5)
+        ttk.Button(export_frame, text="💾 Export NoSuccess", command=lambda: self.export_data("NoSuccess")).pack(side="left", padx=5)
 
         exec_frame = ttk.Frame(bottom_frame)
         exec_frame.pack(side="right", fill="y")
@@ -429,18 +426,23 @@ class AutomationToolGUI:
                 for iid in self.tree.get_children():
                     raw = self.data_map.get(iid)
                     if not raw: continue
-                    
                     status = self.tree.item(iid, "tags")[0]
                     save = False
-                    if mode == "All": save = True
-                    elif mode == "Success" and status == "Success": save = True
-                    elif mode == "Fail" and status == "Fail": save = True
-                    elif mode == "NoSuccess" and status != "Success": save = True
-                    
+                    if mode == "All":
+                        save = True
+                    elif mode == "Success" and status == "Success":
+                        save = True
+                    elif mode == "Fail" and status == "Fail":
+                        save = True
+                    elif mode == "NoSuccess":
+                        # NoSuccess: khác Success và Pending
+                        if status != "Success" and status != "Pending" and status != "Done":
+                            save = True
                     if save:
                         file.write("\t".join(raw) + "\n")
             messagebox.showinfo("Export", "Done!")
-        except Exception as e: messagebox.showerror("Error", str(e))
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
 if __name__ == "__main__":
     root = tk.Tk()
