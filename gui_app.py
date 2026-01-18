@@ -41,7 +41,8 @@ class AutomationToolGUI:
         self.stats_total = tk.IntVar(value=0)
         self.stats_success = tk.IntVar(value=0)
         self.stats_fail = tk.IntVar(value=0)
-        self.stats_processed = tk.IntVar(value=0)
+        self.stats_running = tk.IntVar(value=0)  # Số tiến trình đang chạy
+        self.stats_processed = tk.IntVar(value=0)  # Số tiến trình đã hoàn thành
 
         self.is_running = False
         self.task_queue = queue.Queue()
@@ -50,8 +51,8 @@ class AutomationToolGUI:
         # --- DEFINING COLUMNS (12 INPUT COLUMNS + ID + NOTE) ---
         # 0:UID, 1:MAIL_LK, 2:USER, 3:PASS, 4:2FA, 5:PHOIGOC, 6:PASSMAIL, ...
         self.columns = [
-            "ID", "UID", "MAIL LK IG", "IG USER", "PASS IG", "2FA", 
-            "PHÔI GỐC", "PASS MAIL", "MAIL KHÔI PHỤC", 
+            "ID", "UID", "LINKED MAIL IG", "IG USER", "IG PASS", "2FA", 
+            "ORIGINAL MAIL", "MAIL PASS", "RECOVERY MAIL", 
             "Post", "Followers", "Following", "COOKIE", "NOTE"
         ]
 
@@ -145,7 +146,7 @@ class AutomationToolGUI:
         ttk.Button(export_frame, text="💾 Export Success", command=lambda: self.export_data("Success")).pack(side="left", padx=5)
         ttk.Button(export_frame, text="💾 Export Failed", command=lambda: self.export_data("Fail")).pack(side="left", padx=5)
         ttk.Button(export_frame, text="💾 Export All", command=lambda: self.export_data("All")).pack(side="left", padx=5)
-        ttk.Button(export_frame, text="💾 Export NoSuccess", command=lambda: self.export_data("NoSuccess")).pack(side="left", padx=5)
+        ttk.Button(export_frame, text="💾 Export NotSuccess", command=lambda: self.export_data("NoSuccess")).pack(side="left", padx=5)
 
         exec_frame = ttk.Frame(bottom_frame)
         exec_frame.pack(side="right", fill="y")
@@ -160,7 +161,7 @@ class AutomationToolGUI:
         ttk.Label(status_bar, text="Status:").pack(side="left")
         ttk.Label(status_bar, textvariable=self.status_var, style="Blue.TLabel").pack(side="left", padx=5)
         ttk.Separator(status_bar, orient="vertical").pack(side="left", fill="y", padx=10)
-        ttk.Label(status_bar, text="Progress:").pack(side="left")
+        ttk.Label(status_bar, text="Process:").pack(side="left")
         self.lbl_progress = ttk.Label(status_bar, text="0/0", font=('Arial', 9, 'bold'))
         self.lbl_progress.pack(side="left", padx=5)
         ttk.Separator(status_bar, orient="vertical").pack(side="left", fill="y", padx=10)
@@ -259,72 +260,81 @@ class AutomationToolGUI:
 
     # ================== WORKER LOGIC (12 COLS MAPPING) ==================
     def worker_task(self, iid):
-        if not self.is_running: return
+        if not self.is_running:
+            return
+
+        # Khi bắt đầu thực sự chạy, tăng số running
+        self.root.after(0, lambda: self.update_running_count(1))
 
         # Load Raw Data (12 Cols)
-        # 0:UID, 1:MAIL_LK, 2:USER, 3:PASS, 4:2FA, 5:PHOI_GOC, 6:PASS_MAIL, ... 11:COOKIE
         row_data = list(self.data_map[iid])
-        
-        # MAPPING INDEX CHÍNH XÁC:
         mail_lk = str(row_data[1]).strip()
-        username = row_data[2]   
+        username = row_data[2]
         gmx_user = str(row_data[5]).strip()
         gmx_pass = str(row_data[6]).strip()
-        cookie = row_data[11]    
-        
+        cookie = row_data[11]
+
         # Auto fix domain GMX
         if "@" not in gmx_user and len(gmx_user) > 0:
             gmx_user = f"{gmx_user}@gmx.net"
 
         self.root.after(0, lambda: self.update_row_status(iid, "Running...", "Running"))
-        
+
         status, note = "Fail", "Unknown"
         driver = None
-        
+
         try:
-            if not get_driver: raise ImportError("Backend missing")
-            
+            if not get_driver:
+                raise ImportError("Backend missing")
             driver = get_driver(headless=self.headless_var.get())
-            
-            # Login IG
             if login_instagram_via_cookie(driver, cookie):
                 self.root.after(0, lambda: self.update_row_status(iid, "2FA Setup...", "Running"))
-                
-                # --- TRUYỀN MAIL LK ---
                 new_key = setup_2fa(
-                    driver, 
-                    email=gmx_user, 
-                    email_pass=gmx_pass, 
-                    target_username=username, 
+                    driver,
+                    email=gmx_user,
+                    email_pass=gmx_pass,
+                    target_username=username,
                     linked_email=mail_lk
                 )
-                
                 if new_key:
                     status = "Success"
                     note = "Done"
-                    row_data[4] = new_key # Update 2FA
+                    row_data[4] = new_key  # Update 2FA
                 else:
                     note = "2FA Failed (No Key)"
             else:
                 note = "Login Failed / Cookie Die"
-                
         except Exception as e:
             msg = str(e)
-            if "RESTRICTED" in msg: note = "Restricted"
-            elif "authentication failed" in msg.lower(): note = "GMX Login Fail"
-            elif "WRONG EMAIL HINT" in msg: note = "Wrong Hint (Both Mails)"
-            else: note = msg
+            if "RESTRICTED" in msg:
+                note = "Restricted"
+            elif "authentication failed" in msg.lower():
+                note = "GMX Login Fail"
+            elif "WRONG EMAIL HINT" in msg:
+                note = "Wrong Hint (Both Mails)"
+            else:
+                note = msg
         finally:
-            if driver: 
-                try: driver.quit()
-                except: pass
+            if driver:
+                try:
+                    driver.quit()
+                except:
+                    pass
 
         # Save & Update UI
         self.data_map[iid] = row_data
         final_ui_vals = [self.tree.item(iid, "values")[0]] + row_data + [note]
-        
         self.root.after(0, lambda: self.update_row_status(iid, note, status, final_ui_vals))
         self.root.after(0, self.update_count, status)
+        # Khi kết thúc, giảm số running
+        self.root.after(0, lambda: self.update_running_count(-1))
+
+    def update_running_count(self, delta):
+        val = self.stats_running.get() + delta
+        if val < 0:
+            val = 0
+        self.stats_running.set(val)
+        self.update_stats()
 
     # ================== UI UPDATES & UTILS ==================
     def update_row_status(self, iid, note, tag, new_vals=None):
@@ -339,26 +349,43 @@ class AutomationToolGUI:
 
     def update_count(self, status):
         self.stats_processed.set(self.stats_processed.get() + 1)
-        if status == "Success": self.stats_success.set(self.stats_success.get() + 1)
-        else: self.stats_fail.set(self.stats_fail.get() + 1)
+        self.stats_running.set(self.stats_running.get() - 1)
+        if status == "Success":
+            self.stats_success.set(self.stats_success.get() + 1)
+        else:
+            self.stats_fail.set(self.stats_fail.get() + 1)
         self.update_stats()
 
     def update_stats(self):
-        self.lbl_progress.config(text=f"{self.stats_processed.get()}/{self.stats_total.get()}")
+        running = self.stats_running.get()
+        # Số tiến trình đã chạy xong + số tiến trình đang chạy (kể cả Running và các bước sau) / tổng số tiến trình
+        done_and_running = 0
+        for iid in self.tree.get_children():
+            status = self.tree.item(iid, "tags")[0]
+            if status != "Pending":
+                done_and_running += 1
+        self.lbl_progress.config(text=f"{done_and_running}/{self.stats_total.get()}")
 
     def start_process(self):
         items = [i for i in self.tree.get_children() if self.tree.item(i, "values")[-1] != "Success" and self.tree.item(i, "values")[-1] != "2FA_EXISTS"]
-        if not items: return messagebox.showinfo("Info", "No pending tasks.")
-        
+        if not items:
+            return messagebox.showinfo("Info", "No pending tasks.")
+
         self.is_running = True
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
         self.status_var.set("Running...")
-        self.stats_success.set(0); self.stats_fail.set(0); self.stats_processed.set(0)
-        
+        self.stats_success.set(0)
+        self.stats_fail.set(0)
+        self.stats_processed.set(0)
+        self.stats_total.set(len(items))
+        self.stats_running.set(0)  # Số tiến trình thực sự đang chạy
+        self.update_stats()
+
         self.task_queue = queue.Queue()
-        for i in items: self.task_queue.put(i)
-        
+        for i in items:
+            self.task_queue.put(i)
+
         threading.Thread(target=self.run_workers, daemon=True).start()
 
     def run_workers(self):
@@ -389,7 +416,7 @@ class AutomationToolGUI:
         self.update_stats_total()
 
     def delete_all_rows(self, confirm=True):
-        if confirm and not messagebox.askyesno("Clear", "Delete All?"): return
+        if confirm and not messagebox.askyesno("Clear", "Delete all rows?"): return
         for i in self.tree.get_children(): self.tree.delete(i)
         self.data_map = {}
         self.update_stats_total()
@@ -435,7 +462,7 @@ class AutomationToolGUI:
                     elif mode == "Fail" and status == "Fail":
                         save = True
                     elif mode == "NoSuccess":
-                        # NoSuccess: khác Success và Pending
+                        # NotSuccess: not Success and not Pending
                         if status != "Success" and status != "Pending" and status != "Done":
                             save = True
                     if save:
