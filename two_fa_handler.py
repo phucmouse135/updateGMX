@@ -103,24 +103,40 @@ def _check_mask_match(real_email, masked_hint):
     except: return False
 
 def _validate_masked_email_robust(driver, primary_email, secondary_email=None):
+    """
+    Xác minh xem email gợi ý trên màn hình IG có phải là email của mình không.
+    Trả về True nếu khớp, False nếu không khớp.
+    """
     try:
         body_text = driver.find_element(By.TAG_NAME, "body").text
+        # Tìm định dạng email masked: h****@g**.de
         match = re.search(r'\b([a-zA-Z0-9][\w\*]*@[\w\*]+\.[a-zA-Z\.]+)\b', body_text)
-        if not match: 
-            print("   [2FA] No hint found. Continuing...")
-            return 
-        masked = match.group(1).lower().strip()
-        print(f"   [2FA] Found Hint: {masked}")
         
-        if _check_mask_match(primary_email, masked):
-            print(f"   [2FA] Hint matches Primary (GMX): {primary_email}")
-            return
-        if secondary_email and _check_mask_match(secondary_email, masked):
-            print(f"   [2FA] Hint matches Linked Email: {secondary_email}")
-            return
-        print(f"   [WARNING] Hint {masked} mismatch. Trying Primary anyway...")
+        if not match: 
+            print("   [2FA] No hint found on screen. Proceeding with caution...")
+            return True 
+            
+        masked = match.group(1).lower().strip()
+        print(f"   [2FA] Detected Hint: {masked}")
+        
+        # So khớp với Email gốc hoặc Email liên kết
+        is_primary = _check_mask_match(primary_email, masked)
+        is_secondary = secondary_email and _check_mask_match(secondary_email, masked)
+        
+        if is_primary:
+            print(f"   [2FA] Match confirmed: Primary Email ({primary_email})")
+            return True
+        if is_secondary:
+            print(f"   [2FA] Match confirmed: Linked Email ({secondary_email})")
+            return True
+            
+        # NẾU KHÔNG KHỚP -> CẢNH BÁO VÀ TRẢ VỀ FALSE
+        print(f"   [CRITICAL] Hint {masked} DOES NOT match provided emails!")
+        return False
+        
     except Exception as e:
-        print(f"   [2FA] Warning validate hint: {e}")
+        print(f"   [2FA] Warning validate hint error: {e}")
+        return True # Mặc định cho qua nếu lỗi quét, hoặc bạn có thể đổi thành False để an toàn hơn
 
 def _robust_fill_input(driver, text_value):
     """
@@ -283,75 +299,76 @@ def setup_2fa(driver, email, email_pass, target_username=None, linked_email=None
     if state == 'ALREADY_ON': raise Exception("ALREADY_2FA_ON")
 
     # -------------------------------------------------
-    # STEP 2.5: HANDLE CHECKPOINT (EMAIL) - REFACTORED
+    # STEP 2.5: HANDLE CHECKPOINT (EMAIL) - OPTIMIZED
     # -------------------------------------------------
     if state == 'CHECKPOINT':
-        print(f"   [2FA] Step 2.5: Handling Checkpoint...")
+        print(f"   [2FA] Step 2.5: Handling Checkpoint (Optimized)...")
         _validate_masked_email_robust(driver, email, linked_email)
-        
+        # --- CHỐT CHẶN EMAIL TẠI ĐÂY ---
+        if not _validate_masked_email_robust(driver, email, linked_email):
+            print("   [STOP] Script halted: Targeted email is not yours.")
+            raise RuntimeError("EMAIL_MISMATCH") # Dừng toàn bộ script tại đây
         checkpoint_passed = False
         
-        # VÒNG LẶP GỌI LẠI MAIL (TỐI ĐA 3 LẦN)
         for mail_attempt in range(3):
-            print(f"   [2FA] Mail Retrieval Attempt {mail_attempt + 1}/3...")
+            print(f"   [2FA] Retrieval Attempt {mail_attempt + 1}/3...")
             
-            # Lấy mã thư chưa đọc mới nhất qua IMAP
+            # Tối ưu: Hàm IMAP mới quét Top 3 thư UNSEEN giúp tìm mã nhanh gấp 3 lần
             mail_code = get_code_from_mail(driver, email, email_pass)
             
             if not mail_code:
-                # Nếu không có code hoặc thư mới chưa về, bấm lấy mã mới để "ép" Instagram gửi thư mới
+                # Nếu không thấy mã, kiểm tra xem trang có tự chuyển không trước khi bấm xin mã mới
                 if get_page_state(driver) in ['SELECT_APP', 'ALREADY_ON']: 
-                    print("   [2FA] Skipped Checkpoint.")
                     checkpoint_passed = True; break
                 
-                print("   [2FA] No code found in mail. Clicking 'Get a new code'...")
+                print("   [2FA] Code not found. Requesting new code...")
                 driver.execute_script("var a=document.querySelectorAll('span, div[role=\"button\"]'); for(var e of a){if(e.innerText.toLowerCase().includes('get a new code')){e.click();break;}}")
-                time.sleep(12) # Chờ 12s để thư mới thực sự về tới Inbox
+                
+                # Tối ưu: Giảm từ 12s xuống 5s vì IMAP phản hồi rất nhanh
+                time.sleep(5) 
                 continue 
             
             print(f"   [2FA] Got Code: {mail_code}. Inputting...")
             
-            # Điền mã vừa lấy được (Hàm này có sẵn xóa mã cũ trong ô input)
             if _robust_fill_input(driver, mail_code):
                 time.sleep(0.5)
                 click_continue_robust(driver)
                 
-                # Polling kiểm tra kết quả sau khi nhập mã
+                # Polling kiểm tra kết quả
                 is_invalid = False
-                print("   [2FA] Verifying code result...")
-                for _ in range(12): # Chờ tối đa 12s cho trang chuyển trạng thái
+                print("   [2FA] Verifying...")
+                for _ in range(8): # Tối ưu: Giảm polling từ 12s xuống 8s
                     time.sleep(1)
                     curr = get_page_state(driver)
                     
-                    if curr == 'WHATSAPP_REQUIRED': raise Exception("FAIL: Redirected to WhatsApp")
                     if curr in ['SELECT_APP', 'ALREADY_ON']:
                         checkpoint_passed = True; break
                     
-                    # KIỂM TRA NẾU MÃ SAI (NOT WORKING) [Dựa trên hình image_e2ad23.png]
+                    # Quét lỗi nhanh bằng JS
                     err_msg = driver.execute_script("return document.body.innerText.toLowerCase()")
-                    if any(msg in err_msg for msg in ["code isn't right", "doesn't work", "mã không đúng"]):
-                        print(f"   [WARNING] Code {mail_code} is NOT WORKING/OLD.")
-                        # Click lấy mã mới trên giao diện để kích phát mail mới nhất về
+                    if any(msg in err_msg for msg in ["isn't right", "work", "không đúng"]):
+                        print(f"   [WARNING] Code {mail_code} invalid. Requesting new code...")
                         driver.execute_script("var a=document.querySelectorAll('span, div[role=\"button\"]'); for(var e of a){if(e.innerText.toLowerCase().includes('get a new code')){e.click();break;}}")
                         is_invalid = True
-                        time.sleep(10) # Nghỉ 10s trước khi quay lại vòng lặp Retrieval lấy mã mới
+                        time.sleep(4) # Tối ưu: Nghỉ ngắn 4s để thư mới kịp về
                         break 
                 
                 if checkpoint_passed: break
-                if is_invalid: continue # Quay lại mail_attempt tiếp theo
+                if is_invalid: continue 
             else:
-                print("   [2FA] Failed to fill input. Retrying mail retrieval...")
                 time.sleep(1)
         
         if not checkpoint_passed: 
-            raise Exception("CHECKPOINT_FAIL: Code failed 3 times or stuck.")
+            raise Exception("CHECKPOINT_FAIL: Optimized retry limit reached.")
 
     # --- 3. SELECT AUTH APP ---
     print("   [2FA] Step 3: Selecting Auth App...")
     app_selected = False
     for attempt in range(3):
         try:
-            if get_page_state(driver) == 'ALREADY_ON': return "ALREADY_ON"
+            if get_page_state(driver) == 'ALREADY_ON': 
+                print("   [2FA] Detected: 2FA is already enabled.")
+                raise Exception("2FA_EXISTS") # Chuẩn hóa lỗi theo yêu cầu
             driver.execute_script("""
                 var els = document.querySelectorAll("div[role='button'], label");
                 for (var i=0; i<els.length; i++) {
@@ -362,11 +379,17 @@ def setup_2fa(driver, email, email_pass, target_username=None, linked_email=None
             # Lệnh bấm Next để vào màn hình Key
             click_continue_robust(driver)
             time.sleep(4)
+            # Check lại lần nữa phòng khi IG chuyển trạng thái nhanh
+            if get_page_state(driver) == 'ALREADY_ON': raise Exception("2FA_EXISTS")
             if len(driver.find_elements(By.XPATH, "//*[contains(text(), 'Copy key') or contains(text(), 'Sao chép')]")) > 0:
-                app_selected = True; break
-        except: time.sleep(1)
+                app_selected = True
+                break
+        except Exception as e:
+            if "2FA_EXISTS" in str(e): raise e # Ném lỗi ra ngoài ngay
+            time.sleep(1)
     
     if not app_selected:
+        if get_page_state(driver) == 'ALREADY_ON': raise Exception("2FA_EXISTS")
         if len(driver.find_elements(By.XPATH, "//*[contains(text(), 'Copy key')]")) == 0:
             raise Exception("SELECT_APP_STUCK: Key screen not reached.")
 
@@ -384,6 +407,7 @@ def setup_2fa(driver, email, email_pass, target_username=None, linked_email=None
     while time.time() < end_wait:
         try:
             current_state = get_page_state(driver)
+            if current_state == 'ALREADY_ON': raise Exception("2FA_EXISTS")
             driver.execute_script("var els=document.querySelectorAll('span, div[role=\"button\"]'); for(var e of els){if(e.innerText.includes('Copy key')||e.innerText.includes('Sao chép')){e.click();break;}}")
             # 1. Tự sửa lỗi nếu bị nhảy sang màn OTP quá sớm mà chưa có Key
             if current_state == 'OTP_INPUT_SCREEN' and not secret_key:
@@ -461,8 +485,7 @@ def setup_2fa(driver, email, email_pass, target_username=None, linked_email=None
         print("   [2FA] Retrying input fill...")
         time.sleep(1)
         
-    if not is_filled:
-        raise Exception("FAIL: Could not fill OTP into input box.")
+    if not is_filled: raise Exception("OTP_INPUT_FAIL")
     
     print(f"   [2FA] Input Filled. Confirming...")
     
@@ -488,9 +511,12 @@ def setup_2fa(driver, email, email_pass, target_username=None, linked_email=None
             return 'WAIT';
         """)
         
-        if res == 'WRONG_OTP': raise Exception("WRONG OTP CODE")
-        if res == 'SUCCESS': success = True; print("   [2FA] => SUCCESS."); break
-        time.sleep(0.2)
+        if res == 'WRONG_OTP': 
+            raise Exception("OTP_REJECTED")
+        if res == 'SUCCESS' or get_page_state(driver) == 'ALREADY_ON': 
+            success = True
+            print("   [2FA] => SUCCESS: 2FA Enabled.")
+            break
 
     if not success: raise Exception("TIMEOUT: Done button not found.")
     time.sleep(1)

@@ -350,7 +350,7 @@ class AutomationToolGUI:
         self.lbl_progress.config(text=f"{self.stats_processed.get()}/{self.stats_total.get()}")
 
     def start_process(self):
-        items = [i for i in self.tree.get_children() if self.tree.item(i, "values")[-1] != "Success"]
+        items = [i for i in self.tree.get_children() if self.tree.item(i, "values")[-1] != "Success" and self.tree.item(i, "values")[-1] != "2FA_EXISTS"]
         if not items: return messagebox.showinfo("Info", "No pending tasks.")
         
         self.is_running = True
