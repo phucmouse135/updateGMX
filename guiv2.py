@@ -48,7 +48,7 @@ class AutomationToolGUI:
         self.data_map = {} 
         
         # --- DEFINING COLUMNS (12 INPUT COLUMNS + ID + NOTE) ---
-        # 0:UID, 1:MAIL_LK, 2:USER, 3:PASS, 4:2FA, 5:PHOIGOC, 6:PASSMAIL, ...
+        # 0:UID, 1:MAILLKIG, 2:USER, 3:PASS, 4:2FA, 5:PHOIGOC, 6:PASSMAIL, ...
         self.columns = [
             "ID", "UID", "MAIL LK IG", "IG USER", "PASS IG", "2FA", 
             "PHÔI GỐC", "PASS MAIL", "MAIL KHÔI PHỤC", 
@@ -124,6 +124,7 @@ class AutomationToolGUI:
         self.tree.tag_configure("Running", background="#ffeeba", foreground="#856404")
         self.tree.tag_configure("Pending", background="white")
 
+        # Context Menu
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="📋 Copy Value", command=self.copy_cell_value)
         self.context_menu.add_separator()
@@ -215,7 +216,7 @@ class AutomationToolGUI:
         ttk.Button(btn_panel, text="🗑️ Clear", command=lambda: self.txt_manual.delete("1.0", tk.END)).pack(side="right", padx=5)
         ttk.Button(btn_panel, text="Cancel", command=win.destroy).pack(side="left")
 
-    # ================== DATA LOGIC ==================
+    # ================== DATA LOGIC (FIXED FOR 12 COLS) ==================
     def browse_file(self):
         f = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
         if f:
@@ -244,14 +245,16 @@ class AutomationToolGUI:
             line = line.strip()
             if not line: continue
             
+            # Tách dòng bằng Tab
             parts = line.split("\t")
-            # Ensure 12 columns
+            
+            # CHUẨN HÓA DỮ LIỆU: Đảm bảo có đủ 12 cột
             while len(parts) < 12: parts.append("")
             
             row_data = parts[:12]
             
             cnt += 1
-            # Add ID/Note
+            # Thêm ID vào đầu, Note vào cuối => Tổng 14 cột trên bảng
             row_display_vals = [cnt] + row_data + ["Pending"]
             
             iid = self.tree.insert("", "end", values=row_display_vals, tags=("Pending",))
@@ -260,19 +263,20 @@ class AutomationToolGUI:
 
         self.update_stats()
 
-    # ================== WORKER LOGIC (12 COLS MAPPING) ==================
+    # ================== WORKER LOGIC (UPDATED WITH LINKED EMAIL) ==================
     def worker_task(self, iid):
         if not self.is_running: return
 
-        # Load Raw Data (12 Cols)
-        # 0:UID, 1:MAIL_LK, 2:USER, 3:PASS, 4:2FA, 5:PHOI_GOC, 6:PASS_MAIL, ... 11:COOKIE
+        # Lấy dữ liệu gốc từ bộ nhớ (12 CỘT)
         row_data = list(self.data_map[iid])
         
         # MAPPING INDEX CHÍNH XÁC:
-        mail_lk = str(row_data[1]).strip()
+        # [0]UID, [1]MAIL_LK, [2]USER, [3]PASS, [4]2FA, [5]PHOI_GOC, [6]PASS_MAIL, ... [11]COOKIE
+        
+        mail_lk = str(row_data[1]).strip()  # <-- Lấy mail liên kết
         username = row_data[2]   
-        gmx_user = str(row_data[5]).strip()
-        gmx_pass = str(row_data[6]).strip()
+        gmx_user = str(row_data[5]).strip() 
+        gmx_pass = str(row_data[6]).strip() 
         cookie = row_data[11]    
         
         # Auto fix domain GMX
@@ -285,7 +289,7 @@ class AutomationToolGUI:
         driver = None
         
         try:
-            if not get_driver: raise ImportError("Backend missing")
+            if not get_driver: raise ImportError("Logic modules missing")
             
             driver = get_driver(headless=self.headless_var.get())
             
@@ -293,19 +297,19 @@ class AutomationToolGUI:
             if login_instagram_via_cookie(driver, cookie):
                 self.root.after(0, lambda: self.update_row_status(iid, "2FA Setup...", "Running"))
                 
-                # --- TRUYỀN MAIL LK ---
+                # --- TRUYỀN linked_email VÀO ---
                 new_key = setup_2fa(
                     driver, 
                     email=gmx_user, 
                     email_pass=gmx_pass, 
-                    target_username=username, 
+                    target_username=username,
                     linked_email=mail_lk
                 )
                 
                 if new_key:
                     status = "Success"
                     note = "Done"
-                    row_data[4] = new_key # Update 2FA
+                    row_data[4] = new_key # Cập nhật cột 2FA
                 else:
                     note = "2FA Failed (No Key)"
             else:
@@ -315,21 +319,22 @@ class AutomationToolGUI:
             msg = str(e)
             if "RESTRICTED" in msg: note = "Restricted"
             elif "authentication failed" in msg.lower(): note = "GMX Login Fail"
-            elif "WRONG EMAIL HINT" in msg: note = "Wrong Hint (Both Mails)"
             else: note = msg
         finally:
             if driver: 
                 try: driver.quit()
                 except: pass
 
-        # Save & Update UI
+        # Cập nhật lại Memory
         self.data_map[iid] = row_data
+        
+        # Cập nhật UI
         final_ui_vals = [self.tree.item(iid, "values")[0]] + row_data + [note]
         
         self.root.after(0, lambda: self.update_row_status(iid, note, status, final_ui_vals))
         self.root.after(0, self.update_count, status)
 
-    # ================== UI UPDATES & UTILS ==================
+    # ================== UI UPDATES ==================
     def update_row_status(self, iid, note, tag, new_vals=None):
         if self.tree.exists(iid):
             if new_vals: self.tree.item(iid, values=new_vals)

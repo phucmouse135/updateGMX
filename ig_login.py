@@ -1,7 +1,34 @@
 # ig_login.py
 import time
 from selenium.webdriver.common.by import By
-from config_utils import parse_cookie_string, wait_and_click, wait_dom_ready
+from config_utils import parse_cookie_string, wait_dom_ready, wait_element
+
+def _handle_cookie_consent(driver):
+    """
+    Xử lý popup 'Allow cookies' của Instagram (Châu Âu/Mỹ thường gặp).
+    Ưu tiên bấm 'Allow all' hoặc 'Decline optional' để đóng popup.
+    """
+    try:
+        # Các từ khóa thường gặp trên nút
+        xpaths = [
+            "//button[contains(text(), 'Allow all cookies')]",
+            "//button[contains(text(), 'Decline optional cookies')]",
+            "//button[contains(text(), 'Only allow essential cookies')]",
+            "//button[contains(text(), 'Chấp nhận tất cả')]",
+            "//button[contains(text(), 'Từ chối cookie')]"
+        ]
+        
+        for xp in xpaths:
+            btns = driver.find_elements(By.XPATH, xp)
+            for btn in btns:
+                if btn.is_displayed():
+                    print("   [IG] Detected Cookie Popup -> Clicking...")
+                    driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(1) # Chờ popup tắt
+                    return True
+    except:
+        pass
+    return False
 
 def login_instagram_via_cookie(driver, cookie_raw_string):
     """
@@ -10,64 +37,70 @@ def login_instagram_via_cookie(driver, cookie_raw_string):
     """
     print("   [IG] Loading Cookies...")
     
-    # Step 1: Must go to homepage first to add cookies
+    # 1. Load Homepage
     driver.get("https://www.instagram.com/")
-    wait_dom_ready(driver, timeout=8)
     
-    # Step 2: Parse and Add Cookies
+    # --- XỬ LÝ POPUP COOKIE NGAY LÚC ĐẦU ---
+    _handle_cookie_consent(driver)
+    
+    # 2. Add Cookies
     cookies = parse_cookie_string(cookie_raw_string)
+    if not cookies:
+        print("   [IG] Error: No cookies parsed.")
+    
     for c in cookies:
-        driver.add_cookie(c)
+        try: driver.add_cookie(c)
+        except: pass
         
-    # Step 3: Refresh to apply cookies
+    # 3. Refresh
     driver.refresh()
-    wait_dom_ready(driver, timeout=10)
-    end_time = time.time() + 6
+    
+    # --- XỬ LÝ POPUP COOKIE LẦN 2 (SAU KHI REFRESH) ---
+    # Đôi khi refresh xong nó mới hiện lại
+    _handle_cookie_consent(driver)
+    
+    # 4. Detection Loop (Fast)
+    end_time = time.time() + 10
+    
+    SEL_PASS = "input[name='password'], input[type='password']"
+    SEL_ERROR = "//*[contains(text(), 'Use another profile') or contains(text(), 'Chuyển tài khoản khác')]"
+    SEL_HOME  = "svg[aria-label='Home'], svg[aria-label='Trang chủ'], svg[aria-label='Search']"
+    
     while time.time() < end_time:
-        if (len(driver.find_elements(By.CSS_SELECTOR, "input[name='password']")) > 0 or 
-            len(driver.find_elements(By.CSS_SELECTOR, "input[type='password']")) > 0 or
-            len(driver.find_elements(By.CSS_SELECTOR, "input[aria-label='Password']")) > 0 or
-            len(driver.find_elements(By.XPATH, "//*[contains(text(), 'Use another profile')]")) > 0 or
-            len(driver.find_elements(By.CSS_SELECTOR, "svg[aria-label='Home']")) > 0 or 
-            len(driver.find_elements(By.CSS_SELECTOR, "svg[aria-label='Trang ch?']")) > 0 or 
-            len(driver.find_elements(By.CSS_SELECTOR, "svg[aria-label='Search']")) > 0):
+        # Check Success
+        if len(driver.find_elements(By.CSS_SELECTOR, SEL_HOME)) > 0:
             break
-        time.sleep(0.2)
-    
-    # Step 4: Handle Popups (Save Info / Notifications)
-    try:
-        wait_and_click(driver, By.XPATH, "//button[contains(text(), 'Not Now') or contains(text(), 'Lúc khác')]", timeout=2)
-        wait_and_click(driver, By.XPATH, "//button[contains(text(), 'Not Now') or contains(text(), 'Lúc khác')]", timeout=2)
-    except:
-        pass
-
-    # Bước 5: Validate Login
-    # Kiểm tra trạng thái đăng nhập
-    # Cập nhật selector input pass dựa trên element: <input name="password" aria-label="Password" type="password" ...>
-    has_password_input = (len(driver.find_elements(By.CSS_SELECTOR, "input[name='password']")) > 0 or 
-                          len(driver.find_elements(By.CSS_SELECTOR, "input[type='password']")) > 0 or
-                          len(driver.find_elements(By.CSS_SELECTOR, "input[aria-label='Password']")) > 0)
-    
-    # Check thêm trường hợp "Use another profile" (nghĩa là cookie lỗi/hết hạn, nó đá ra màn hình chọn nick)
-    has_use_another_profile = len(driver.find_elements(By.XPATH, "//*[contains(text(), 'Use another profile') or contains(text(), 'Chuyển tài khoản khác')]")) > 0
-
-    has_home_icon = (len(driver.find_elements(By.CSS_SELECTOR, "svg[aria-label='Home']")) > 0 or 
-                     len(driver.find_elements(By.CSS_SELECTOR, "svg[aria-label='Trang chủ']")) > 0 or 
-                     len(driver.find_elements(By.CSS_SELECTOR, "svg[aria-label='Search']")) > 0)
-
-    # Nếu vẫn còn ô nhập password HOẶC nút "Use another profile" VÀ không thấy Home -> Coi như Login Fail
-    if (has_password_input or has_use_another_profile) and not has_home_icon:
-        print("   [IG] Login FAIL (Cookie dead or incorrect).")
-        raise Exception("COOKIE_DIE: Found Login Form")
+        # Check Fail
+        if len(driver.find_elements(By.CSS_SELECTOR, SEL_PASS)) > 0:
+            break
+        if len(driver.find_elements(By.XPATH, SEL_ERROR)) > 0:
+            break
         
-    # Nếu thấy Avatar hoặc Home Icon -> Login Pass
-    # Selector SVG aria-label='Home' hoặc 'Trang chủ'
-    if len(driver.find_elements(By.CSS_SELECTOR, "svg[aria-label='Home']")) > 0 or \
-       len(driver.find_elements(By.CSS_SELECTOR, "svg[aria-label='Trang chủ']")) > 0 or \
-       len(driver.find_elements(By.CSS_SELECTOR, "svg[aria-label='Search']")) > 0:
+        # Check Popup again while waiting
+        _handle_cookie_consent(driver)
+        
+        time.sleep(0.5)
+
+    # 5. Handle Notification Popups (Not Now)
+    try:
+        popups = driver.find_elements(By.XPATH, "//button[contains(text(), 'Not Now') or contains(text(), 'Lúc khác')]")
+        for btn in popups:
+            if btn.is_displayed():
+                driver.execute_script("arguments[0].click();", btn)
+    except: pass
+
+    # 6. Validate
+    has_pass = len(driver.find_elements(By.CSS_SELECTOR, SEL_PASS)) > 0
+    has_home = len(driver.find_elements(By.CSS_SELECTOR, SEL_HOME)) > 0
+    
+    if has_pass and not has_home:
+        print("   [IG] Login FAIL (Cookie dead).")
+        return False
+        
+    if has_home:
         print("   [IG] Login SUCCESS!")
         return True
         
-    # Trường hợp check point (vẫn tính là login được để xử lý tiếp)
-    print("   [IG] Warning: Not at Login screen but Home not found (Might be Checkpoint).")
+    # Checkpoint case
+    print("   [IG] Warning: Home not found (Possible Checkpoint).")
     return True

@@ -1,43 +1,19 @@
-# Hướng dẫn sử dụng Tool Auto 2FA Instagram
+# Instagram Auto 2FA Tool
 
-Vui lòng thực hiện theo đúng thứ tự các bước dưới đây để tool hoạt động tốt nhất.
+This tool automates the process of enabling two-factor authentication (2FA) for Instagram accounts.
 
-## Bước 1: Chuẩn bị môi trường mạng
-*   **Bắt buộc**: Bật **VPN** chuyển vùng sang **USA** (Mỹ) trước khi chạy tool.
-*   Instagram rất nhạy cảm với IP, việc dùng IP USA sạch sẽ giúp tránh Checkpoint.
+## Error Codes
 
-## Bước 2: Cài đặt môi trường Python
-Mở Terminal (CMD hoặc PowerPoint) tại thư mục tool và chạy các lệnh sau:
+This section explains the meaning of the error codes that may appear in the "Note" column of the application.
 
-### 2.1. Tạo môi trường ảo (Virtual Environment)
-```bash
-python -m venv .venv
-```
-
-### 2.2. Kích hoạt môi trường ảo
-*   **Windows (PowerShell):**
-    ```powershell
-    .\.venv\Scripts\Activate.ps1
-    ```
-*   **Windows (CMD):**
-    ```cmd
-    .\.venv\Scripts\activate.bat
-    ```
-
-### 2.3. Cài đặt thư viện cần thiết
-```bash
-pip install -r requirement.txt
-```
-*(Nếu file tên là `requirements.txt`, hãy sửa lệnh tương ứng)*
-
-## Bước 3: Chạy Tool
-Sau khi cài đặt xong, chạy lệnh sau để mở giao diện điều khiển:
-
-```bash
-python gui_app.py
-```
-
-## Lưu ý quan trọng
-1.  **Format Input**: File input phải đúng định dạng Tab-separated (copy từ Excel/Google Sheet là chuẩn nhất).
-2.  **Giờ hệ thống**: Đảm bảo đồng hồ máy tính được đồng bộ chính xác (Sync Time), nếu lệch giờ mã OTP sẽ bị sai.
-3.  **Chrome Driver**: Tool sẽ tự động tải Chrome Driver tương ứng. Hãy đảm bảo bạn đã tắt các Chrome đang chạy ngầm nếu gặp lỗi.
+- **`LOGIN_FAILED`**: The cookie provided is invalid or expired, and the login to Instagram failed.
+- **`INSTAGRAM_BLOCKED`**: Instagram has temporarily blocked the action, likely due to security reasons (e.g., unfamiliar device). Please try again later.
+- **`ALREADY_2FA_ON`**: Two-factor authentication is already enabled for the account.
+- **`NO_IG_ACCOUNT_FOUND`**: No Instagram account was found on the account selection page.
+- **`ACCOUNT_SELECTION_STUCK`**: The process is stuck on the account selection page.
+- **`MAIL_CODE_FETCH_FAILED`**: The tool failed to retrieve the verification code from the email. This could be due to incorrect email credentials or a delay in receiving the email.
+- **`WRONG_EMAIL_CODE`**: The email verification code entered was incorrect.
+- **`SECRET_KEY_NOT_FOUND`**: The 2FA secret key could not be found on the page.
+- **`WRONG_OTP_CODE`**: The one-time password (OTP) from the authenticator app was incorrect. Please check your device's time and try again.
+- **`OTP_TIMEOUT`**: The process timed out while waiting for the OTP confirmation screen.
+- **`CRITICAL_ERROR`**: A critical error occurred, and the 2FA setup could not be completed.
