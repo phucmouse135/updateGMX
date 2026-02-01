@@ -1,4 +1,5 @@
 selenium
-webdriver-manager
 pyotp
 colorama
+psutil
+pyperclip

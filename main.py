@@ -4,7 +4,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from config_utils import get_driver
 from ig_login import login_instagram_via_cookie
-from two_fa_handler import setup_2fa
+from two_fa_handler import Instagram2FAStep
 from colorama import Fore, init
 
 init(autoreset=True)
@@ -61,7 +61,8 @@ def process_account(line_data):
                 # Truyền đúng email user/pass của GMX vào đây
                 print(Fore.CYAN + f"[{username}] Getting 2FA...")
                 
-                secret_key = setup_2fa(driver, email_user, email_pass, target_username=username)
+                instagram_2fa = Instagram2FAStep(driver)
+                secret_key = instagram_2fa.setup_2fa(email_user, email_pass, target_username=username)
                 
                 # 4. Success
                 result_to_save = secret_key

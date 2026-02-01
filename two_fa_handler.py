@@ -1,523 +1,741 @@
-# two_fa_handler.py
+# step4_2fa.py
 import time
 import re
 import pyotp
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys 
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
-from config_utils import wait_and_click, wait_dom_ready, wait_element
+from config_utils import wait_dom_ready, wait_element
+import pyperclip
 
-# --- IMPORT MAIL HANDLER ---
-try:
-    from mail_handler import get_code_from_mail
-except ImportError:
-    print("   [ERROR] Missing 'mail_handler.py'!")
+# Import Mail Handler
+from mail_handler import get_2fa_code_v2
 
-# ==========================================
-# 1. JS SENSOR (TRẠNG THÁI TRANG)
-# ==========================================
-def get_page_state(driver):
-    """Quét toàn bộ Body để xác định trạng thái hiện tại."""
-    js_sensor = """
-    function checkState() {
-        var body = document.body.innerText.toLowerCase();
-        var url = window.location.href;
+class Instagram2FAStep:
+    def __init__(self, driver):
+        self.driver = driver
+        self.target_url = "https://accountscenter.instagram.com/password_and_security/two_factor/"
+        self.on_status_update = None  # Callback for status updates
+        self.on_secret_key_found = None
 
-        // 0. Check trang Download Lite
-        if (body.includes("download instagram lite") || url.includes("lite") || body.includes("download apk")) {
-            return 'LITE_PAGE';
-        }
+    def _take_exception_screenshot(self, exception_type, additional_info=""):
+        """Take a screenshot when an exception occurs for debugging purposes."""
+        try:
+            import os
+            timestamp = int(time.time())
+            screenshot_dir = "screenshots"
+            os.makedirs(screenshot_dir, exist_ok=True)
+            
+            # Clean exception type for filename
+            clean_exception = str(exception_type).replace(":", "_").replace(" ", "_").replace("/", "_")[:50]
+            clean_info = str(additional_info).replace(":", "_").replace(" ", "_").replace("/", "_")[:30]
+            
+            filename = f"exception_{clean_exception}_{clean_info}_{timestamp}.png"
+            screenshot_path = os.path.join(screenshot_dir, filename)
+            
+            self.driver.save_screenshot(screenshot_path)
+            print(f"   [Exception Screenshot] Saved: {screenshot_path}")
+            return screenshot_path
+        except Exception as screenshot_e:
+            print(f"   [Exception Screenshot] Failed to save screenshot: {screenshot_e}")
+            return None
 
-        // --- CHECK UNUSUAL LOGIN ---
-        if (body.includes("unusual login") || body.includes("suspicious login") || (body.includes("this was me") && body.includes("this wasn't me"))) {
-            return 'UNUSUAL_LOGIN';
-        }
-        
-        // 1. Check lỗi chặn/khóa
-        if (body.includes("you can't make this change") || body.includes("change at the moment")) return 'RESTRICTED';
-        if (body.includes("suspended") || body.includes("đình chỉ")) return 'SUSPENDED';
-        if (body.includes("sorry, this page isn't available")) return 'BROKEN';
+    def _safe_element_action(self, action_func, max_retries=3, delay=0.5):
+        """
+        Helper to perform element actions with retry on StaleElementReferenceException.
+        Ensures stability by re-locating elements if they become stale.
+        """
+        from selenium.common.exceptions import StaleElementReferenceException
+        for attempt in range(max_retries):
+            try:
+                return action_func()
+            except StaleElementReferenceException:
+                if attempt < max_retries - 1:
+                    print(f"   [Step 4] Element stale, retrying ({attempt+1}/{max_retries})...")
+                    time.sleep(delay)
+                else:
+                    raise
+        return False
 
-        // 2. Check 2FA đã bật
-        if (body.includes("authentication is on") || body.includes("xác thực 2 yếu tố đang bật")) {
-             return 'ALREADY_ON';
-        }
-        
-        // 3. Check Select App
-        if (body.includes("help protect your account") || body.includes("authentication app") || body.includes("ứng dụng xác thực")) {
-             return 'SELECT_APP';
-        }
-
-        // --- BLOCK UNSUPPORTED METHODS ---
-        if (body.includes("check your whatsapp") || body.includes("whatsapp account") || body.includes("gửi đến whatsapp")) {
-            return 'WHATSAPP_REQUIRED';
-        }
-        if (body.includes("check your sms") || body.includes("text message") || body.includes("tin nhắn văn bản")) {
-            return 'SMS_REQUIRED';
-        }
-
-        // 4. Check Checkpoint
-        var inputs = document.querySelectorAll("input");
-        for (var i=0; i<inputs.length; i++) {
-            if (inputs[i].offsetParent !== null) {
-                var attr = (inputs[i].name + " " + inputs[i].placeholder + " " + inputs[i].getAttribute("aria-label")).toLowerCase();
-                if (attr.includes("code") || attr.includes("security") || inputs[i].type === "tel" || inputs[i].type === "number") {
-                    return 'CHECKPOINT';
+    def _find_code_input(self):
+        """
+        Helper to find the code input element using JS.
+        """
+        return self.driver.execute_script("""
+            var inputs = document.querySelectorAll('input');
+            for (var inp of inputs) {
+                if (inp.offsetParent !== null) {
+                    var name = inp.name.toLowerCase();
+                    var placeholder = inp.placeholder ? inp.placeholder.toLowerCase() : '';
+                    var id = inp.id ? inp.id.toLowerCase() : '';
+                    if (name === 'code' || placeholder.includes('code') || inp.type === 'tel' || inp.maxLength == 6 || id.startsWith('_r_') || (inp.type === 'text' && inp.autocomplete === 'off')) {
+                        return inp;
+                    }
                 }
             }
-        }
-        
-        if (body.includes("check your email") || body.includes("enter the code")) return 'CHECKPOINT';
+            return null;
+        """)
 
-        // Màn hình chọn phương thức (Step 3)
-        if (body.includes("help protect your account") || (body.includes("authentication app") && body.includes("sms"))) return 'SELECT_APP';
+    def setup_2fa(self, gmx_user, gmx_pass, target_username, linked_mail=None):
+        """
+        Setup 2FA Flow - Logic gốc bảo toàn, thêm tối ưu chống treo.
+        """
+        try: 
+            if self.on_status_update: self.on_status_update("Accessing settings...")
+            print(f"   [Step 4] Accessing settings...")
+            print(f"   [Step 4] Starting 2FA Setup for {target_username}...")
+            self.driver.get(self.target_url)
+            wait_dom_ready(self.driver, timeout=5)
 
-        var hasInput = document.querySelector("input[name='code']") || document.querySelector("input[placeholder*='Code']");
-        var hasNext = false;
-        var btns = document.querySelectorAll("button, div[role='button']");
-        for (var b of btns) { if (b.innerText.toLowerCase().includes("next") || b.innerText.toLowerCase().includes("tiếp")) hasNext = true; }
+            # --- 0. BYPASS 'DOWNLOAD APP' PAGE ---
+            self._bypass_lite_page()
+            # Verify bypass completed
+            # -------------------------------------------------
+            # STEP 1: SELECT ACCOUNT
+            # -------------------------------------------------
+            if self.on_status_update: self.on_status_update("Selecting Account...")
+            print(f"   [Step 4] Step 1: Selecting Account for {target_username}...")
+            self._select_account_center_profile(target_username)
+            # Verify account selection completed
 
-        // NHẬN DIỆN MÀN HÌNH NHẬP OTP (STEP 5)
-        if (hasInput && body.includes("authentication app") && hasNext) return 'OTP_INPUT_SCREEN';
-        return 'UNKNOWN';
-    }
-    return checkState();
-    """
-    try: return driver.execute_script(js_sensor)
-    except: return 'UNKNOWN'
-
-# ==========================================
-# 2. HELPERS
-# ==========================================
-
-def _check_mask_match(real_email, masked_hint):
-    if not real_email or "@" not in real_email: return False
-    try:
-        real_user, real_domain = real_email.lower().strip().split("@")
-        mask_user, mask_domain = masked_hint.lower().strip().split("@")
-        if mask_domain[0] != '*' and mask_domain[0] != real_domain[0]: return False
-        if "." in mask_domain:
-            if mask_domain.split('.')[-1] != real_domain.split('.')[-1]: return False
-        if mask_user[0] != '*' and mask_user[0] != real_user[0]: return False
-        return True
-    except: return False
-
-def _validate_masked_email_robust(driver, primary_email, secondary_email=None):
-    """
-    Xác minh xem email gợi ý trên màn hình IG có phải là email của mình không.
-    Trả về True nếu khớp, False nếu không khớp.
-    """
-    try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-        # Tìm định dạng email masked: h****@g**.de
-        match = re.search(r'\b([a-zA-Z0-9][\w\*]*@[\w\*]+\.[a-zA-Z\.]+)\b', body_text)
-        
-        if not match: 
-            print("   [2FA] No hint found on screen. Proceeding with caution...")
-            return True 
+            # -------------------------------------------------
+            # STEP 2: SCAN STATE & HANDLE EXCEPTIONS
+            # -------------------------------------------------
+            if self.on_status_update: self.on_status_update("Scanning UI State...")
+            print("   [Step 4] Scanning UI State...")
+            state = "UNKNOWN"
             
-        masked = match.group(1).lower().strip()
-        print(f"   [2FA] Detected Hint: {masked}")
-        
-        # So khớp với Email gốc hoặc Email liên kết
-        is_primary = _check_mask_match(primary_email, masked)
-        is_secondary = secondary_email and _check_mask_match(secondary_email, masked)
-        
-        if is_primary:
-            print(f"   [2FA] Match confirmed: Primary Email ({primary_email})")
-            return True
-        if is_secondary:
-            print(f"   [2FA] Match confirmed: Linked Email ({secondary_email})")
-            return True
-            
-        # NẾU KHÔNG KHỚP -> CẢNH BÁO VÀ TRẢ VỀ FALSE
-        print(f"   [CRITICAL] Hint {masked} DOES NOT match provided emails!")
-        return False
-        
-    except Exception as e:
-        print(f"   [2FA] Warning validate hint error: {e}")
-        return True # Mặc định cho qua nếu lỗi quét, hoặc bạn có thể đổi thành False để an toàn hơn
+            # Quét 15 lần (Logic gốc)
+            for _ in range(15):
+                state = self._get_page_state()
+                
+                # UNUSUAL LOGIN FIX
+                if state == 'UNUSUAL_LOGIN':
+                    print("   [Step 4] Detected 'Unusual Login'. Clicking 'This Was Me'...")
+                    if self._click_continue_robust():
+                        print("   [Step 4] Clicked 'This Was Me'. Waiting...")
+                        wait_dom_ready(self.driver, timeout=5)
+                        if "two_factor" not in self.driver.current_url:
+                            self.driver.get(self.target_url)
+                            wait_dom_ready(self.driver, timeout=5)
+                    continue 
 
-def _robust_fill_input(driver, text_value):
-    """
-    Điền code: Tìm trong Modal trước, dùng ActionChains gõ phím.
-    Check value sau khi gõ để đảm bảo.
-    """
-    input_el = None
-    
-    # A. Tìm Input trong Dialog/Modal
-    try:
-        dialog_inputs = driver.find_elements(By.CSS_SELECTOR, "div[role='dialog'] input, div[role='main'] input")
-        for inp in dialog_inputs:
-            if inp.is_displayed(): 
-                input_el = inp
-                break
-    except: pass
-
-    # B. Fallback Selector
-    if not input_el:
-        selectors = ["input[name='code']", "input[placeholder*='Code']", "input[type='tel']", "input[maxlength='6']"]
-        for sel in selectors:
-            try:
-                el = driver.find_element(By.CSS_SELECTOR, sel)
-                if el.is_displayed(): 
-                    input_el = el
+                if state == 'LITE_PAGE': 
+                    self.driver.get(self.target_url)
+                    wait_dom_ready(self.driver, timeout=5)
+                    continue
+                
+                # BLOCK UNSUPPORTED METHODS
+                if state == 'WHATSAPP_REQUIRED': 
+                    self._take_exception_screenshot("STOP_FLOW_2FA", "WhatsApp Verification Required")
+                    raise Exception("STOP_FLOW_2FA: WhatsApp Verification Required")
+                if state == 'SMS_REQUIRED': 
+                    self._take_exception_screenshot("STOP_FLOW_2FA", "SMS Verification Required")
+                    raise Exception("STOP_FLOW_2FA: SMS Verification Required")
+                if state == 'BROKEN': 
+                    self._take_exception_screenshot("STOP_FLOW_2FA", "Page Broken/Content Unavailable")
+                    raise Exception("STOP_FLOW_2FA: Page Broken/Content Unavailable")
+                
+                # Thoát vòng lặp nếu trạng thái đã rõ ràng
+                if state in ['SELECT_APP', 'CHECKPOINT', 'ALREADY_ON', 'RESTRICTED', 'OTP_INPUT_SCREEN']: 
                     break
-            except: pass
-    
-    if not input_el: return False
-    val = str(text_value).strip()
+                
+                time.sleep(0.5)
 
-    # C. ActionChains Typing
-    try:
-        ActionChains(driver).move_to_element(input_el).click().perform()
-        time.sleep(0.1)
-        input_el.send_keys(Keys.CONTROL + "a"); input_el.send_keys(Keys.DELETE)
-        for char in val: 
-            input_el.send_keys(char)
-            time.sleep(0.03) 
-        
-        # Check value update
-        for _ in range(10):
-            if input_el.get_attribute("value").replace(" ", "") == val: return True
-            time.sleep(0.2)
-    except: pass
+            print(f"   [Step 4] Detected State: {state}")
 
-    # D. JS Inject Fallback
-    try:
-        driver.execute_script("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('input', {bubbles:true}));", input_el, val)
-        time.sleep(0.5)
-        return input_el.get_attribute("value").replace(" ", "") == val
-    except: pass
-    
-    return False
+            if state == 'RESTRICTED': 
+                self._take_exception_screenshot("STOP_FLOW_2FA", "RESTRICTED_DEVICE")
+                raise Exception("STOP_FLOW_2FA: RESTRICTED_DEVICE")
+            if state == 'SUSPENDED': 
+                self._take_exception_screenshot("STOP_FLOW_2FA", "ACCOUNT_SUSPENDED")
+                raise Exception("STOP_FLOW_2FA: ACCOUNT_SUSPENDED")
+            if state == 'ALREADY_ON': 
+                print("   [Step 4] 2FA is already ON.")
+                return "ALREADY_2FA_ON"
 
-def click_continue_robust(driver):
-    """Click Continue/Next/Done"""
-    js_click = """
-    var keywords = ["Next", "Tiếp", "Continue", "Submit", "Xác nhận", "Confirm", "Done", "Xong", "This Was Me", "Đây là tôi", "Đúng là tôi"];
-    var btns = document.querySelectorAll("button, div[role='button']");
-    for (var b of btns) {
-        var txt = b.innerText.trim();
-        for(var k of keywords) { 
-            if(txt.includes(k) && b.offsetParent !== null && !b.disabled && b.offsetHeight > 0) { 
-                b.click(); return true; 
-            } 
-        }
-    }
-    return false;
-    """
-    return driver.execute_script(js_click)
+            # Verify state scanning completed with valid state
+            # -------------------------------------------------
+            # STEP 2.5: HANDLE CHECKPOINT (INTERNAL)
+            # -------------------------------------------------
+            if state == 'CHECKPOINT':
+                if self.on_status_update: self.on_status_update("Handling Checkpoint...")
+                print(f"   [Step 4] Step 2.5: Handling Internal Checkpoint...")
+                if not self._validate_masked_email_robust(gmx_user, linked_mail):
+                    print("   [STOP] Script halted: Targeted email is not yours.")
+                    self._take_exception_screenshot("STOP_FLOW_2FA", "EMAIL_MISMATCH")
+                    raise Exception("STOP_FLOW_2FA: EMAIL_MISMATCH") 
+                time.sleep(1.5)
+                self._solve_internal_checkpoint(gmx_user, gmx_pass, target_username)
+                # Verify checkpoint handling completed
+                new_state = self._get_page_state()
+                state = new_state
 
-# ==========================================
-# 3. MAIN LOGIC FLOW
-# ==========================================
+            # -------------------------------------------------
+            # STEP 3: SELECT AUTH APP
+            # -------------------------------------------------
+            if self.on_status_update: self.on_status_update("Selecting Auth App...")
+            print("   [Step 4] Step 3: Selecting Auth App...")
+            self._select_auth_app_method(state)
+            # Verify auth app selection complete
 
-def setup_2fa(driver, email, email_pass, target_username=None, linked_email=None):
-    print(f"   [2FA] Accessing settings...")
-    target_url = "https://accountscenter.instagram.com/password_and_security/two_factor/"
-    driver.get(target_url)
-    wait_dom_ready(driver, timeout=5)
+            # -------------------------------------------------
+            # STEP 4: GET SECRET KEY (CHỐT CHẶN CỨNG - KHÔNG SKIP)
+            # -------------------------------------------------
+            wait_dom_ready(self.driver, timeout=5)
+            if self.on_status_update: self.on_status_update("Getting Secret Key...")
+            print("   [Step 4] Step 4: Getting Secret Key (Blocking until captured)...")
+            time.sleep(2)  # Reduced from 5 to 2 for speed 
+            
+            # [UPDATED] Hàm này đã được tối ưu để check Anti-Freeze
+            secret_key = self._extract_secret_key()
+            
+            def format_key_groups(key):
+                key_nospaces = key.replace(" ", "")
+                return " ".join([key_nospaces[i:i+4] for i in range(0, len(key_nospaces), 4)])
 
-    # --- 0. BYPASS 'DOWNLOAD APP' PAGE ---
-    if "lite" in driver.current_url or len(driver.find_elements(By.XPATH, "//*[contains(text(), 'Download Instagram Lite')]")) > 0:
-        print("   [2FA] Detected 'Download Lite' page. Attempting bypass...")
-        try:
-            btns = driver.find_elements(By.XPATH, "//*[contains(text(), 'Not now') or contains(text(), 'Lúc khác')]")
-            if btns: 
-                btns[0].click()
-                wait_dom_ready(driver, timeout=5)
-            else: 
-                driver.get(target_url)
-                wait_dom_ready(driver, timeout=5)
-        except: pass
+            secret_key_grouped = format_key_groups(secret_key)
+            self.last_secret_key_raw = secret_key_grouped # Lưu lại cho GUI
+            
+            print(f"\n========================================\n[Step 4] !!! SECRET KEY FOUND: {secret_key_grouped}\n========================================\n")
+            if self.on_secret_key_found:
+                self.on_secret_key_found(secret_key)
+            # Tính toán OTP ngay sau khi có secret key để tiết kiệm thời gian
+            key_for_otp = secret_key.replace(" ","")
+            totp = pyotp.TOTP(key_for_otp, interval=30)
+            otp_code = totp.now()
+            print(f"   [Step 4] Pre-generated OTP Code: {otp_code}")
 
-    # -------------------------------------------------
-    # STEP 1: SELECT ACCOUNT
-    # -------------------------------------------------
-    print("   [2FA] Step 1: Selecting Account...")
-    acc_selected = False
-    for attempt in range(3):
-        try:
-            wait_element(driver, By.XPATH, "//div[@role='button'] | //a[@role='link']", timeout=5)
-            clicked = driver.execute_script("""
-                var els = document.querySelectorAll('div[role="button"], a[role="link"]');
-                for (var i=0; i<els.length; i++) {
-                    if (els[i].innerText.toLowerCase().includes('instagram')) { els[i].click(); return true; }
-                }
-                return false;
-            """)
-            if clicked: 
-                acc_selected = True
-                wait_dom_ready(driver, timeout=5)
-                break
+            # Callback GUI
+            if hasattr(self, 'on_secret_key_found') and callable(self.on_secret_key_found):
+                try: self.on_secret_key_found(secret_key_grouped)
+                except Exception as e: print(f"[Step 4] GUI callback error: {e}")
+
+            # -------------------------------------------------
+            # STEP 5: CONFIRM OTP (FIXED INPUT)
+            # -------------------------------------------------
+            if self.on_status_update: self.on_status_update("Confirming OTP...")
+            print("   [Step 4] Clicking Next to Input OTP...")
+            self._click_continue_robust()
+            
+            # Đảm bảo chắc chắn sang màn hình nhập OTP (giảm timeout xuống 5s, poll 0.5s)
+            wait_end = time.time() + 5
+            while time.time() < wait_end:
+                if self._get_page_state() == 'OTP_INPUT_SCREEN':
+                    print("   [Step 4] Confirmed: On OTP Input Screen.")
+                    break
+                time.sleep(0.5)
             else:
-                if "lite" in driver.current_url: 
-                    driver.get(target_url)
-                    wait_dom_ready(driver, timeout=5)
+                print("   [Step 4] Warning: Not on OTP input screen yet, proceeding anyway.")
+            
+            print(f"   [Step 4] Using OTP Code: {otp_code}")
+            
+            is_filled = False
+            fill_end = time.time() + 5  # Giảm timeout xuống 5s
+            while time.time() < fill_end:
+                if self._robust_fill_input(otp_code):
+                    is_filled = True; break
+                print("   [Step 4] Retrying input fill...")
+                time.sleep(0.5)  # Poll nhanh hơn
+                
+            if not is_filled: 
+                self._take_exception_screenshot("STOP_FLOW_2FA", "OTP_INPUT_FAIL")
+                raise Exception("STOP_FLOW_2FA: OTP_INPUT_FAIL")
+            
+            print(f"   [Step 4] OTP Input Filled. Confirming...")
+            time.sleep(0.3)  # Giảm wait xuống 0.3s
+            self._click_continue_robust()
+            
+            
+            # -------------------------------------------------
+            # LOGIC RECOVERY (CONTENT NO LONGER AVAILABLE)
+            # -------------------------------------------------
+            time.sleep(2) # Chờ popup
+            
+            is_error_popup = self.driver.execute_script("""
+                var body = document.body.innerText.toLowerCase();
+                var keywords = ["content is no longer available", "không khả dụng", "không hiển thị được lúc này"];
+                return keywords.some(k => body.includes(k));
+            """)
+
+            if is_error_popup:
+                print("   [Step 4] ⚠️ CRITICAL: Error Pop-up detected! Initiating Recovery Flow...")
+                
+                # 1. RELOAD
+                print("   [Recovery] Reloading page...")
+                self.driver.refresh(); wait_dom_ready(self.driver, timeout=10); time.sleep(2)
+                # 2. CLICK NEXT
+                print("   [Recovery] Clicking Next/Continue...")
+                self._click_continue_robust(); time.sleep(5)
+
+                # 3. HANDOVER STEP 2
+                print("   [Recovery] Handover to Step 2 Handler...")
+                from step2_exceptions import InstagramExceptionStep
+                step2_handler = InstagramExceptionStep(self.driver)
+                current_status = step2_handler._check_verification_result()
+                print(f"   [Recovery] Status detected: {current_status}")
+                step2_handler.handle_status(current_status, target_username, gmx_user, gmx_pass, linked_mail, None)
+
+                # 4. CLICK TO HOME
+                print("   [Recovery] Finalizing: Clearing post-login screens...")
+                max_final_clicks = 8
+                for i in range(max_final_clicks):
+                    curr_url = self.driver.current_url.lower()
+                    try: body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+                    except: body_text = ""
+
+                    is_home = "instagram.com/" in curr_url and \
+                            "/challenge/" not in curr_url and \
+                            "/two_factor/" not in curr_url and \
+                            any(k in body_text for k in ["search", "home", "reels", "direct", "posts"])
+                    
+                    if is_home:
+                        print("   [Recovery] SUCCESS: Reached Instagram Home.")
+                        break 
+                    
+                    clicked = self.driver.execute_script("""
+                        var selectors = ["button", "div[role='button']", "span"];
+                        var keywords = ["next", "tiếp", "continue", "submit", "xác nhận", "confirm", "done", "xong", "save", "lưu", "not now", "lúc khác"];
+                        for (var sel of selectors) {
+                            var btns = document.querySelectorAll(sel);
+                            for (var b of btns) {
+                                var txt = b.innerText.toLowerCase();
+                                if (b.offsetParent !== null && keywords.some(k => txt.includes(k))) {
+                                    b.click(); return true;
+                                }
+                            }
+                        }
+                        return false;
+                    """)
+                    if not clicked: time.sleep(1)
+                    else: time.sleep(2)
+
+                print("   [Recovery] Flow Completed. Returning Success immediately.")
+                return secret_key_grouped 
+
+            else:
+                print("   [Step 4] No error pop-up detected. Continuing standard check...")
+            
+            # -------------------------------------------------
+            # STANDARD CHECK (DONE BUTTON)
+            # -------------------------------------------------
+            if self.on_status_update: self.on_status_update("Waiting for completion...")
+            print("   [Step 4] Waiting for completion...")
+            end_confirm = time.time() + 60
+            success = False
+            
+            while time.time() < end_confirm:
+                res = self.driver.execute_script("""
+                    var body = document.body.innerText.toLowerCase();
+                    if (body.includes("code isn't right") || body.includes("mã không đúng")) return 'WRONG_OTP';
+                    if (body.includes("this content is no longer available") || body.includes("không khả dụng")) return 'SUCCESS';
+                    
+                    var doneBtns = document.querySelectorAll("span, div[role='button']");
+                    for(var b of doneBtns) {
+                        if((b.innerText === 'Done' || b.innerText === 'Xong') && b.offsetParent !== null) {
+                            b.click(); return 'SUCCESS';
+                        }
+                    }
+                    if (body.includes("authentication is on")) return 'SUCCESS';
+                    return 'WAIT';
+                """)
+                
+                if res == 'WRONG_OTP': 
+                    self._take_exception_screenshot("STOP_FLOW_2FA", "OTP_REJECTED")
+                    raise Exception("STOP_FLOW_2FA: OTP_REJECTED")
+                if res == 'SUCCESS' or self._get_page_state() == 'ALREADY_ON': 
+                    success = True
+                    print("   [Step 4] => SUCCESS: 2FA Enabled.")
+                    break
+                time.sleep(1)
+
+            if not success: 
+                self._take_exception_screenshot("STOP_FLOW_2FA", "TIMEOUT (Done button not found)")
+                raise Exception("STOP_FLOW_2FA: TIMEOUT (Done button not found)")
+            time.sleep(1)
+            return secret_key_grouped
+        except Exception as e: # <--- THÊM EXCEPT ĐỂ BẮT MỌI LỖI
+            err_msg = str(e)
+            print(f"   [Step 4] Error handled gracefully: {err_msg}")
+            
+            # Trả về nội dung lỗi để điền vào cột 2FA
+            # Loại bỏ prefix "STOP_FLOW_2FA: " cho ngắn gọn nếu muốn
+            clean_err = err_msg.replace("STOP_FLOW_2FA: ", "").strip()
+            return f"ERROR_2FA: {clean_err}"
+
+    # ==========================================
+    # CORE HELPERS
+    # ==========================================
+
+    def _bypass_lite_page(self):
+        if "lite" in self.driver.current_url or len(self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Download Instagram Lite')]")) > 0:
+            print("   [Step 4] Detected 'Download Lite' page. Attempting bypass...")
+            try:
+                btns = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Not now') or contains(text(), 'Lúc khác')]")
+                if btns: 
+                    btns[0].click(); wait_dom_ready(self.driver, timeout=5)
+                else: 
+                    self.driver.get(self.target_url); wait_dom_ready(self.driver, timeout=5)
+            except: pass
+
+    def _select_account_center_profile(self, target_username):
+        acc_selected = False
+        for attempt in range(3):
+            try:
+                wait_element(self.driver, By.XPATH, "//div[@role='button'] | //a[@role='link']", timeout=5)
+                clicked = self.driver.execute_script("""
+                    var target = arguments[0].toLowerCase();
+                    var els = document.querySelectorAll('div[role="button"], a[role="link"]');
+                    // Ưu tiên chọn tài khoản có username chính xác
+                    for (var i=0; i<els.length; i++) {
+                        var txt = els[i].innerText.toLowerCase();
+                        if (txt.includes(target) && txt.includes('instagram')) { 
+                            els[i].click(); return true; 
+                        }
+                    }
+                    // Fallback: Chọn bất kỳ tài khoản Instagram nào
+                    for (var i=0; i<els.length; i++) {
+                        if (els[i].innerText.toLowerCase().includes('instagram')) { 
+                            els[i].click(); return true; 
+                        }
+                    }
+                    return false;
+                """, target_username)
+                if clicked: 
+                    acc_selected = True; wait_dom_ready(self.driver, timeout=5); break
                 else: time.sleep(1)
-        except: time.sleep(1)
-    
-    if not acc_selected: print("   [2FA] Warning: Select Account failed (May already be inside).")
+            except: time.sleep(1)
+        if not acc_selected: print("   [Step 4] Warning: Select Account failed (May already be inside).")
 
-    # -------------------------------------------------
-    # STEP 2: SCAN STATE
-    # -------------------------------------------------
-    print("   [2FA] Scanning UI State...")
-    state = "UNKNOWN"
-    for _ in range(15):
-        state = get_page_state(driver)
-        
-        # UNUSUAL LOGIN FIX
-        if state == 'UNUSUAL_LOGIN':
-            print("   [2FA] Detected 'Unusual Login'. Clicking 'This Was Me'...")
-            if click_continue_robust(driver):
-                print("   [2FA] Clicked 'This Was Me'. Waiting...")
-                wait_dom_ready(driver, timeout=5)
-                if "two_factor" not in driver.current_url:
-                    driver.get(target_url)
-                    wait_dom_ready(driver, timeout=5)
-                continue 
-            else: print("   [2FA] Cannot find 'This Was Me' button.")
+    def _get_page_state(self):
+        # [UPDATED] JS Sensor nhanh + check Content Unavailable
+        js_sensor = """
+        function checkState() {
+            var body = document.body.innerText.toLowerCase();
+            var url = window.location.href;
 
-        if state == 'LITE_PAGE': 
-            driver.get(target_url)
-            wait_dom_ready(driver, timeout=5)
-            continue
-        
-        # BLOCK UNSUPPORTED
-        if state == 'WHATSAPP_REQUIRED': raise Exception("FAIL: WhatsApp Verification Required")
-        if state == 'SMS_REQUIRED': raise Exception("FAIL: SMS Verification Required")
-        
-        if state in ['SELECT_APP', 'CHECKPOINT', 'ALREADY_ON', 'RESTRICTED']: break
-        time.sleep(0.5)
+            if (body.includes("content is no longer available")) return 'BROKEN';
+            if (body.includes("sorry, this page isn't available")) return 'BROKEN';
 
-    print(f"   [2FA] Detected State: {state}")
+            if (body.includes("download instagram lite") || url.includes("lite") || body.includes("download apk")) return 'LITE_PAGE';
 
-    if state == 'RESTRICTED': raise RuntimeError("RESTRICTED_DEVICE")
-    if state == 'SUSPENDED': raise RuntimeError("ACCOUNT_SUSPENDED")
-    if state == 'ALREADY_ON': raise Exception("ALREADY_2FA_ON")
+            if (body.includes("unusual login") || body.includes("suspicious login")) return 'UNUSUAL_LOGIN';
+            
+            if (body.includes("you can't make this change")) return 'RESTRICTED';
+            if (body.includes("suspended") || body.includes("đình chỉ")) return 'SUSPENDED';
 
-    # -------------------------------------------------
-    # STEP 2.5: HANDLE CHECKPOINT (EMAIL) - OPTIMIZED
-    # -------------------------------------------------
-    if state == 'CHECKPOINT':
-        print(f"   [2FA] Step 2.5: Handling Checkpoint (Optimized)...")
-        _validate_masked_email_robust(driver, email, linked_email)
-        # --- CHỐT CHẶN EMAIL TẠI ĐÂY ---
-        if not _validate_masked_email_robust(driver, email, linked_email):
-            print("   [STOP] Script halted: Targeted email is not yours.")
-            raise RuntimeError("EMAIL_MISMATCH") # Dừng toàn bộ script tại đây
+            if (body.includes("authentication is on") || body.includes("xác thực 2 yếu tố đang bật")) return 'ALREADY_ON';
+            
+            if (body.includes("help protect your account") || body.includes("authentication app")) return 'SELECT_APP';
+
+            if (body.includes("check your whatsapp")) return 'WHATSAPP_REQUIRED';
+            if (body.includes("check your sms")) return 'SMS_REQUIRED';
+
+            // Check input fields for Checkpoint
+            var inputs = document.querySelectorAll("input");
+            for (var i=0; i<inputs.length; i++) {
+                if (inputs[i].offsetParent !== null) {
+                    var attr = (inputs[i].name + " " + inputs[i].placeholder + " " + inputs[i].getAttribute("aria-label")).toLowerCase();
+                    if (attr.includes("code") || attr.includes("security") || inputs[i].type === "tel" || inputs[i].type === "number") {
+                        return 'CHECKPOINT';
+                    }
+                }
+            }
+            if (body.includes("check your email")) return 'CHECKPOINT';
+
+            var hasInput = document.querySelector("input[name='code']") || document.querySelector("input[placeholder*='Code']");
+            var hasNext = false;
+            var btns = document.querySelectorAll("button, div[role='button']");
+            for (var b of btns) { if (b.innerText.toLowerCase().includes("next") || b.innerText.toLowerCase().includes("tiếp")) hasNext = true; }
+
+            if (hasInput && body.includes("authentication app") && hasNext) return 'OTP_INPUT_SCREEN';
+            return 'UNKNOWN';
+        }
+        return checkState();
+        """
+        try: return self.driver.execute_script(js_sensor)
+        except: return 'UNKNOWN'
+
+    def _solve_internal_checkpoint(self, gmx_user, gmx_pass, target_ig_username):
+        print(f"   [Step 4] Solving Internal Checkpoint for {target_ig_username}...")
         checkpoint_passed = False
         
-        for mail_attempt in range(3):
-            print(f"   [2FA] Retrieval Attempt {mail_attempt + 1}/3...")
+        for mail_attempt in range(1, 6):
+            print(f"   [Step 4] Mail Retrieval Attempt {mail_attempt}/5...")
+            code = get_2fa_code_v2(gmx_user, gmx_pass, target_ig_username)
             
-            # Tối ưu: Hàm IMAP mới quét Top 3 thư UNSEEN giúp tìm mã nhanh gấp 3 lần
-            mail_code = get_code_from_mail(driver, email, email_pass)
-            
-            if not mail_code:
-                # Nếu không thấy mã, kiểm tra xem trang có tự chuyển không trước khi bấm xin mã mới
-                if get_page_state(driver) in ['SELECT_APP', 'ALREADY_ON']: 
+            if not code:
+                if self._get_page_state() in ['SELECT_APP', 'ALREADY_ON']: 
                     checkpoint_passed = True; break
-                
-                print("   [2FA] Code not found. Requesting new code...")
-                driver.execute_script("var a=document.querySelectorAll('span, div[role=\"button\"]'); for(var e of a){if(e.innerText.toLowerCase().includes('get a new code')){e.click();break;}}")
-                
-                # Tối ưu: Giảm từ 12s xuống 5s vì IMAP phản hồi rất nhanh
-                time.sleep(5) 
-                continue 
-            
-            print(f"   [2FA] Got Code: {mail_code}. Inputting...")
-            
-            if _robust_fill_input(driver, mail_code):
-                time.sleep(0.5)
-                click_continue_robust(driver)
-                
-                # Polling kiểm tra kết quả
-                is_invalid = False
-                print("   [2FA] Verifying...")
-                for _ in range(8): # Tối ưu: Giảm polling từ 12s xuống 8s
+                print("   [Step 4] Code not found. Clicking 'Get new code'...")
+                self.driver.execute_script("var a=document.querySelectorAll('span, div[role=\"button\"]'); for(var e of a){if(e.innerText.toLowerCase().includes('get a new code')){e.click();break;}}")
+                # Poll for new code
+                for poll in range(3):
+                    time.sleep(2)
+                    code = get_2fa_code_v2(gmx_user, gmx_pass, target_ig_username)
+                    if code: break
+                if not code:
+                    print("   [Step 4] Still no code after polling. Continuing to next attempt...")
+                    continue 
+
+            print(f"   [Step 4] Inputting Code: {code}")
+            if self._robust_fill_input(code):
+                self._click_continue_robust()
+                time.sleep(1)  # Chờ UI update sau click
+                is_wrong_code = False
+                print("   [Step 4] Verifying...")
+                time.sleep(1)  # Reduced from 2 to 1 for speed
+
+                verify_attempts = 0
+                while verify_attempts < 8:
                     time.sleep(1)
-                    curr = get_page_state(driver)
-                    
+                    curr = self._get_page_state()
                     if curr in ['SELECT_APP', 'ALREADY_ON']:
-                        checkpoint_passed = True; break
+                        checkpoint_passed = True; print("   [Step 4] Checkpoint Passed!"); break
                     
-                    # Quét lỗi nhanh bằng JS
-                    err_msg = driver.execute_script("return document.body.innerText.toLowerCase()")
-                    if any(msg in err_msg for msg in ["isn't right", "work", "không đúng"]):
-                        print(f"   [WARNING] Code {mail_code} invalid. Requesting new code...")
-                        driver.execute_script("var a=document.querySelectorAll('span, div[role=\"button\"]'); for(var e of a){if(e.innerText.toLowerCase().includes('get a new code')){e.click();break;}}")
-                        is_invalid = True
-                        time.sleep(4) # Tối ưu: Nghỉ ngắn 4s để thư mới kịp về
-                        break 
-                
+                    err_msg = self.driver.execute_script("return document.body.innerText.toLowerCase()")
+                    if ("isn't right" in err_msg or "không đúng" in err_msg or "incorrect" in err_msg or 
+                        "the code you entered" in err_msg or "mã bạn đã nhập" in err_msg or "wrong code" in err_msg or 
+                        "code is invalid" in err_msg or "mã không hợp lệ" in err_msg):
+                        print(f"   [WARNING] Code {code} REJECTED."); is_wrong_code = True; break
+                    
+                    print("   [Step 4] Not verified yet, retrying confirm...")
+                    self._click_continue_robust()
+                    verify_attempts += 1
+
                 if checkpoint_passed: break
-                if is_invalid: continue 
-            else:
-                time.sleep(1)
+                if is_wrong_code:
+                    print("   [Step 4] Code rejected. Clearing input and requesting new code...")
+                    # Clear input trước khi get new code
+                    try:
+                        input_el = self.driver.find_element(By.CSS_SELECTOR, "input[name='code'], input[placeholder*='Code']")
+                        input_el.send_keys(Keys.CONTROL + "a"); input_el.send_keys(Keys.DELETE)
+                    except: pass
+                    # Click Get new code
+                    self.driver.execute_script("var a=document.querySelectorAll('span, div[role=\"button\"]'); for(var e of a){if(e.innerText.toLowerCase().includes('get a new code')){e.click();break;}}")
+                    # Chờ mail mới với poll
+                    print("   [Step 4] Waiting for new code in mail...")
+                    for poll in range(3):  # Poll 3 lần, mỗi lần 2s
+                        time.sleep(2)
+                        new_code = get_2fa_code_v2(gmx_user, gmx_pass, target_ig_username)
+                        if new_code and new_code != code:  # Đảm bảo code mới khác code cũ
+                            print(f"   [Step 4] New code received: {new_code}")
+                            code = new_code
+                            break
+                    else:
+                        print("   [Step 4] No new code after polling. Will retry in next attempt.")
+                    continue
+            else: time.sleep(1)
         
         if not checkpoint_passed: 
-            raise Exception("CHECKPOINT_FAIL: Optimized retry limit reached.")
+            self._take_exception_screenshot("STOP_FLOW_2FA", "Checkpoint Failed after retries")
+            raise Exception("STOP_FLOW_2FA: Checkpoint Failed after retries")
 
-    # --- 3. SELECT AUTH APP ---
-    print("   [2FA] Step 3: Selecting Auth App...")
-    app_selected = False
-    for attempt in range(3):
+    def _select_auth_app_method(self, current_state):
+        if self._get_page_state() == 'ALREADY_ON': return
         try:
-            if get_page_state(driver) == 'ALREADY_ON': 
-                print("   [2FA] Detected: 2FA is already enabled.")
-                raise Exception("2FA_EXISTS") # Chuẩn hóa lỗi theo yêu cầu
-            driver.execute_script("""
+            self.driver.execute_script("""
                 var els = document.querySelectorAll("div[role='button'], label");
                 for (var i=0; i<els.length; i++) {
                      if (els[i].innerText.toLowerCase().includes("authentication app")) { els[i].click(); break; }
                 }
             """)
-            time.sleep(1)
-            # Lệnh bấm Next để vào màn hình Key
-            click_continue_robust(driver)
-            time.sleep(4)
-            # Check lại lần nữa phòng khi IG chuyển trạng thái nhanh
-            if get_page_state(driver) == 'ALREADY_ON': raise Exception("2FA_EXISTS")
-            if len(driver.find_elements(By.XPATH, "//*[contains(text(), 'Copy key') or contains(text(), 'Sao chép')]")) > 0:
-                app_selected = True
-                break
-        except Exception as e:
-            if "2FA_EXISTS" in str(e): raise e # Ném lỗi ra ngoài ngay
-            time.sleep(1)
-    
-    if not app_selected:
-        if get_page_state(driver) == 'ALREADY_ON': raise Exception("2FA_EXISTS")
-        if len(driver.find_elements(By.XPATH, "//*[contains(text(), 'Copy key')]")) == 0:
-            raise Exception("SELECT_APP_STUCK: Key screen not reached.")
-
-    # -------------------------------------------------
-    # STEP 4: GET SECRET KEY (CHỐT CHẶN CỨNG - KHÔNG SKIP)
-    # -------------------------------------------------
-    # time.sleep(5)
-    wait_dom_ready(driver, timeout=5)
-    print("   [2FA] Step 4: Getting Secret Key (Blocking until captured)...")
-    secret_key = ""
-    wait_dom_ready(driver, timeout=5)
-    
-    # Vòng lặp lấy Key: TUYỆT ĐỐI KHÔNG BẤM NEXT Ở ĐÂY
-    end_wait = time.time() + 60
-    while time.time() < end_wait:
-        try:
-            current_state = get_page_state(driver)
-            if current_state == 'ALREADY_ON': raise Exception("2FA_EXISTS")
-            driver.execute_script("var els=document.querySelectorAll('span, div[role=\"button\"]'); for(var e of els){if(e.innerText.includes('Copy key')||e.innerText.includes('Sao chép')){e.click();break;}}")
-            # 1. Tự sửa lỗi nếu bị nhảy sang màn OTP quá sớm mà chưa có Key
-            if current_state == 'OTP_INPUT_SCREEN' and not secret_key:
-                print("   [2FA] Warning: Skiped to OTP screen! Clicking Back to find Key...")
-                # Click nút Back (biểu tượng < ở góc trái phía trên)
-                driver.execute_script("""
-                    var b = document.querySelector('div[role="button"] svg'); 
-                    if(b) b.closest('div[role="button"]').click();
-                """)
-                # Đợi màn hình quay lại màn Key
-                for _ in range(10):
-                    if len(driver.find_elements(By.XPATH, "//*[contains(text(), 'Copy key')]")) > 0: break
-                    time.sleep(0.5)
-
-            driver.execute_script("""
-                var els = document.querySelectorAll('span, div[role="button"]'); 
-                for(var e of els){
-                    if(e.innerText.includes('Copy key') || e.innerText.includes('Sao chép')){
-                        e.click(); break;
-                    }
-                }
-            """)
-            # 3. Quét mã từ Text Body
-            full_text = driver.find_element(By.TAG_NAME, "body").text
-            m = re.search(r'([A-Z2-7]{4}\s?){4,}', full_text) 
-            if m:
-                clean = m.group(0).replace(" ", "").strip()
-                if len(clean) >= 16: secret_key = clean; break
-            
-            # 4. Quét mã từ các Input ẩn (Trường hợp mã nằm trong ô text readonly)
-            if not secret_key:
-                inputs = driver.find_elements(By.TAG_NAME, "input")
-                for inp in inputs:
-                    val = inp.get_attribute("value")
-                    if val:
-                        clean_val = val.replace(" ", "").strip()
-                        # Xác thực mã Base32 hợp lệ (chỉ gồm A-Z và 2-7, dài >= 16)
-                        if len(clean_val) >= 16 and re.match(r'^[A-Z2-7]+$', clean_val):
-                            secret_key = clean_val
-                            break
-            if secret_key: break
         except: pass
-        time.sleep(1.5)
-    
-    if not secret_key: 
-        raise Exception("STOP: Secret Key NOT found! Blocking flow to prevent Ghost 2FA.")
-    
-    # IN KEY KIỂM SOÁT
-    print(f"\n========================================\n[2FA] !!! SECRET KEY FOUND: {secret_key}\n========================================\n")
+        self._click_continue_robust()
+        poll_end = time.time() + 30
+        while time.time() < poll_end:
+            state = self._get_page_state()
+            if state == 'ALREADY_ON': return
+            if len(self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Copy key') or contains(text(), 'Sao chép')]") ) > 0: return
+            time.sleep(1)
 
-    # =========================================================
-    # STEP 5: CONFIRM OTP (FIXED INPUT)
-    # =========================================================
-    
-    # 1. Click Next từ màn hình Copy Key
-    print("   [2FA] Clicking Next to Input OTP...")
-    click_continue_robust(driver)
-    
-    # 2. Tính toán OTP
-    clean_key = "".join(secret_key.split())
-    totp = pyotp.TOTP(clean_key, interval=30)
-    otp_code = totp.now()
-    
-    # 3. Chờ ô Input xuất hiện
-    print(f"   [2FA] Waiting for OTP Input (Code: {otp_code})...")
-    
-    # 4. ĐIỀN OTP BẰNG HÀM ROBUST
-    is_filled = False
-    fill_end = time.time() + 10 # Thử trong 10s
-    while time.time() < fill_end:
-        # Thử điền
-        if _robust_fill_input(driver, otp_code):
-            is_filled = True
-            break
-        print("   [2FA] Retrying input fill...")
-        time.sleep(1)
+    def _extract_secret_key(self, ig_username):
+        """Lấy Secret Key (Có logic Anti-Freeze: Thoát nếu lỗi trang)."""
+        max_attempts = 10
+        failure_reason = "Unknown failure"
         
-    if not is_filled: raise Exception("OTP_INPUT_FAIL")
-    
-    print(f"   [2FA] Input Filled. Confirming...")
-    
-    # 5. Confirm
-    time.sleep(0.5)
-    click_continue_robust(driver)
-    
-    print("   [2FA] Waiting for completion...")
-    end_confirm = time.time() + 15
-    success = False
-    
-    while time.time() < end_confirm:
-        res = driver.execute_script("""
-            var body = document.body.innerText.toLowerCase();
-            if (body.includes("code isn't right") || body.includes("mã không đúng")) return 'WRONG_OTP';
+        for attempt in range(1, max_attempts + 1):
+            secret_key = ""
+            end_wait = time.time() + 80  # Chờ tối đa 80 giây
+            copy_key_found = False
+            key_extraction_attempted = False
             
-            var doneBtns = document.querySelectorAll("span");
-            for(var b of doneBtns) {
-                if((b.innerText === 'Done' || b.innerText === 'Xong') && b.offsetParent !== null) {
-                    b.click(); return 'SUCCESS';
+            while time.time() < end_wait:
+                try:
+                    # [ANTI-FREEZE Check]
+                    current_state = self._get_page_state() # Check nhanh bằng JS
+                    if current_state == 'BROKEN':
+                         failure_reason = "Page shows 'Content is no longer available' or similar error"
+                         self._take_exception_screenshot("STOP_FLOW_2FA", failure_reason)
+                         raise Exception(f"STOP_FLOW_2FA: {failure_reason}")
+                    if current_state == 'SUSPENDED':
+                         failure_reason = "Account appears to be suspended"
+                         self._take_exception_screenshot("STOP_FLOW_2FA", failure_reason)
+                         raise Exception(f"STOP_FLOW_2FA: {failure_reason}")
+                    if "two_factor" not in self.driver.current_url and "challenge" not in self.driver.current_url:
+                         failure_reason = f"Redirected away from 2FA setup page to: {self.driver.current_url}"
+                         self._take_exception_screenshot("STOP_FLOW_2FA", failure_reason)
+                         raise Exception(f"STOP_FLOW_2FA: {failure_reason}")
+                    if current_state == 'ALREADY_ON': 
+                        return "ALREADY_2FA_ON"
+
+                    # Kiểm tra sự xuất hiện của "Copy key" button trước khi extract
+                    copy_key_buttons = self.driver.find_elements(By.CSS_SELECTOR, 'div[role="button"]')
+                    has_copy_key = any('Copy key' in btn.text or 'Sao chép' in btn.text for btn in copy_key_buttons)
+                    
+                    if has_copy_key:
+                        copy_key_found = True
+                        key_extraction_attempted = True
+                        # Click "Copy key" button để copy vào clipboard
+                        try:
+                            copy_button = next(btn for btn in copy_key_buttons if 'Copy key' in btn.text or 'Sao chép' in btn.text)
+                            # Clear clipboard trước khi copy
+                            pyperclip.copy('')
+                            # Scroll to button and use JS click to avoid interception
+                            self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'instant', block: 'center'});", copy_button)
+                            time.sleep(0.5)
+                            self.driver.execute_script("arguments[0].click();", copy_button)
+                            time.sleep(1.0)  # Tăng delay để chờ copy hoàn tất
+                            raw_key = pyperclip.paste().replace(" ", "").strip()
+                            print(f"   [Step 4] Copied from clipboard: {raw_key}")
+                            if len(raw_key) >= 16 and re.match(r'^[A-Z2-7]+$', raw_key):
+                                # Skip if it contains the username (case insensitive)
+                                if ig_username.lower() in raw_key.lower():
+                                    print(f"   [Step 4] Skipped potential key containing username: {raw_key}")
+                                    continue
+                                secret_key = raw_key
+                                break
+                            else:
+                                print(f"   [Step 4] Invalid key format from clipboard: {raw_key} (length: {len(raw_key)})")
+                        except Exception as e:
+                            print(f"   [Step 4] Error clicking Copy key or getting from clipboard: {e}")
+                            # Fallback: Lấy trực tiếp từ span element
+                            try:
+                                secret_span = self.driver.find_element(By.CSS_SELECTOR, 'span[class*="x1lliihq"]')
+                                self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'instant', block: 'center'});", secret_span)
+                                time.sleep(0.5)
+                                raw_key = secret_span.text.replace(" ", "").strip()
+                                print(f"   [Step 4] Fallback extracted from span: {raw_key}")
+                                if len(raw_key) >= 16 and re.match(r'^[A-Z2-7]+$', raw_key):
+                                    if ig_username.lower() in raw_key.lower():
+                                        print(f"   [Step 4] Skipped potential key from span: {raw_key}")
+                                        continue
+                                    secret_key = raw_key
+                                    break
+                                else:
+                                    print(f"   [Step 4] Invalid key format from span: {raw_key} (length: {len(raw_key)})")
+                            except Exception as e2:
+                                print(f"   [Step 4] Fallback span extraction failed: {e2}")
+                    else:
+                        print("   [Step 4] 'Copy key' button not detected. Waiting...")
+                        # Nếu chưa có "Copy key", tiếp tục chờ
+                        continue
+
+                    if current_state == 'OTP_INPUT_SCREEN' and not secret_key:
+                        print("   [Step 4] Warning: Skiped to OTP screen! Clicking Back...")
+                        self.driver.execute_script("var b = document.querySelector('div[role=\"button\"] svg'); if(b) b.closest('div[role=\"button\"]').click();")
+                        time.sleep(1); continue
+
+                    # Fallback: regex trên body text (nếu cần)
+                    if not secret_key and copy_key_found:
+                        key_extraction_attempted = True
+                        full_text = self.driver.find_element(By.TAG_NAME, "body").text
+                        m = re.search(r'([A-Z2-7]{4}\s?){4,}', full_text)
+                        if m:
+                            clean = m.group(0).replace(" ", "").strip()
+                            if len(clean) >= 16:
+                                # Skip if it contains the username (case insensitive)
+                                if clean.lower()  in  ig_username.lower():
+                                    print(f"   [Step 4] Skipped potential key containing username: {clean}")
+                                    continue
+                                secret_key = clean; break
+
+                    if not secret_key and copy_key_found:
+                        key_extraction_attempted = True
+                        inputs = self.driver.find_elements(By.TAG_NAME, "input")
+                        for inp in inputs:
+                            val = inp.get_attribute("value")
+                            if val:
+                                clean_val = val.replace(" ", "").strip()
+                                if len(clean_val) >= 16 and re.match(r'^[A-Z2-7]+$', clean_val):
+                                    # Skip if it contains the username
+                                    if ig_username.lower() in clean_val.lower():
+                                        print(f"   [Step 4] Skipped potential key from input containing username: {clean_val}")
+                                        continue
+                                    secret_key = clean_val; break
+                    if len(secret_key) >= 16: break
+                except Exception as e:
+                    if "STOP_FLOW" in str(e): raise e
+                    pass
+                time.sleep(0.5)  # Giảm từ 1s xuống 0.5s để poll nhanh hơn
+
+            if secret_key: 
+                return secret_key
+            else:
+                if not copy_key_found:
+                    failure_reason = f"'Copy key' button never appeared within 80 seconds (attempt {attempt}/{max_attempts})"
+                elif key_extraction_attempted:
+                    failure_reason = f"Secret key found but invalid format or contained username (attempt {attempt}/{max_attempts})"
+                else:
+                    failure_reason = f"Unable to extract secret key after 80 seconds wait (attempt {attempt}/{max_attempts})"
+                print(f"   [Step 4] {failure_reason}")
+                time.sleep(2)
+
+        self._take_exception_screenshot("STOP_FLOW_2FA", failure_reason)
+        raise Exception(f"STOP_FLOW_2FA: {failure_reason}")
+    def _validate_masked_email_robust(self, primary_email, secondary_email=None):
+        try:
+            body_text = self.driver.find_element(By.TAG_NAME, "body").text
+            match = re.search(r'\b([a-zA-Z0-9][\w\*]*@[\w\*]+\.[a-zA-Z\.]+)\b', body_text)
+            if not match: return True 
+            masked = match.group(1).lower().strip()
+            print(f"   [Step 4] Mask Hint: {masked}")
+            def check(real, mask):
+                if not real or "@" not in real: return False
+                r_u, r_d = real.lower().split("@"); m_u, m_d = mask.lower().split("@")
+                if m_d[0] != '*' and m_d[0] != r_d[0]: return False
+                if "." in m_d and m_d.split('.')[-1] != r_d.split('.')[-1]: return False
+                if m_u[0] != '*' and m_u[0] != r_u[0]: return False
+                return True
+            if check(primary_email, masked): return True
+            if secondary_email and check(secondary_email, masked): return True
+            print(f"   [CRITICAL] Hint {masked} mismatch!"); return False
+        except: return True
+
+    def _click_continue_robust(self):
+        return self.driver.execute_script("""
+            var keywords = ["Next", "Tiếp", "Continue", "Submit", "Xác nhận", "Confirm", "Done", "Xong", "This Was Me", "Đây là tôi", "Đúng là tôi"];
+            var btns = document.querySelectorAll("button, div[role='button']");
+            for (var b of btns) {
+                var txt = b.innerText.trim();
+                for(var k of keywords) { 
+                    if(txt.includes(k) && b.offsetParent !== null && !b.disabled && b.offsetHeight > 0) { b.click(); return true; } 
                 }
             }
-            return 'WAIT';
+            return false;
         """)
-        
-        if res == 'WRONG_OTP': 
-            raise Exception("OTP_REJECTED")
-        if res == 'SUCCESS' or get_page_state(driver) == 'ALREADY_ON': 
-            success = True
-            print("   [2FA] => SUCCESS: 2FA Enabled.")
-            break
 
-    if not success: raise Exception("TIMEOUT: Done button not found.")
-    time.sleep(1)
-    return secret_key
+    def _robust_fill_input(self, text_value):
+        val = str(text_value).strip()
+        
+        def fill_action():
+            input_el = self._find_code_input()
+            if not input_el:
+                return False
+            
+            # Nhập từng ký tự với delay để mô phỏng nhập thật
+            ActionChains(self.driver).move_to_element(input_el).click().perform()
+            # Đảm bảo xóa code cũ: select all và delete
+            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys('a').key_up(Keys.CONTROL).send_keys(Keys.DELETE).perform()
+            input_el.clear()  # Thêm clear() để đảm bảo
+            for char in val:
+                input_el.send_keys(char)
+                time.sleep(0.05)  # Giảm delay xuống 0.05s để nhập nhanh hơn
+            time.sleep(0.3)  # Giảm wait xuống 0.3s
+            return input_el.get_attribute("value").replace(" ", "") == val
+        
+        try:
+            return self._safe_element_action(fill_action)
+        except Exception as e:
+            print(f"   [Step 4] Input fill failed after retries: {e}")
+            return False
