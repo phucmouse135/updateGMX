@@ -7,9 +7,12 @@ from selenium.webdriver.common.keys import Keys
 from config_utils import wait_element, wait_and_click, wait_and_send_keys, wait_dom_ready
 
 class InstagramLoginStep:
-    def __init__(self, driver):
+    def __init__(self, driver, username=None, password=None):
         self.driver = driver
-        self.base_url = "https://www.instagram.com/"
+        self.username = username
+        self.password = password
+        self.base_url = "https://accountscenter.instagram.com/"
+        self.two_fa_url = "https://accountscenter.instagram.com/password_and_security/two_factor/"
         self.count = 0
 
     def load_cookies_from_string(self, cookie_str):
@@ -71,6 +74,13 @@ class InstagramLoginStep:
             status = self._detect_initial_status()
             print(f"   [Step 1] Intermediate login status: {status}")
             
+            if status == "FAIL_LOGIN_REDIRECTED_TO_PROFILE_SELECTION":
+                if self.password:
+                    self._handle_profile_selection_login()
+                    continue
+                else:
+                    return status
+            
             # Nếu status đã rõ ràng (không phải Unknown/Retry) -> Return ngay
             if status not in ["LOGGED_IN_UNKNOWN_STATE"]:
                 return status
@@ -86,10 +96,10 @@ class InstagramLoginStep:
         try:
             wait_dom_ready(self.driver, timeout=5)
             
-            # Check URL for cookie choice
+            # Check URL for 2FA page (direct access indicates successful login)
             current_url = self.driver.current_url.lower()
-            if "user_cookie_choice" in current_url:
-                return "COOKIE_CONSENT_POPUP"
+            if "two_factor" in current_url or "password_and_security" in current_url:
+                return "LOGGED_IN_SUCCESS"
             
             try:
                 body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
@@ -323,19 +333,34 @@ class InstagramLoginStep:
             return f"ERROR_DETECT_EXCEPTION: {str(e)}"
         
 
-def login_instagram_via_cookie(driver, cookie_str):
+    def _handle_profile_selection_login(self):
+        try:
+            print("   [Step 1] Handling profile selection login...")
+            # Click "Log into Instagram" or "Continue"
+            login_button = wait_element(self.driver, By.XPATH, "//*[contains(text(), 'Log into Instagram')]", timeout=10)
+            wait_and_click(self.driver, login_button)
+            # Wait for password input
+            password_input = wait_element(self.driver, By.CSS_SELECTOR, "input[type='password']", timeout=10)
+            wait_and_send_keys(self.driver, password_input, self.password + Keys.RETURN)
+            print("   [Step 1] Entered password and submitted.")
+        except Exception as e:
+            print(f"   [Step 1] Failed to handle profile selection login: {e}")
+            raise
+
+
+def login_instagram_via_cookie(driver, cookie_str, username=None, password=None):
     """
-    Login to Instagram using cookies from string.
+    Login to Instagram using cookies from string and go directly to 2FA setup.
     Returns: (bool, status_string)
     """
-    login_step = InstagramLoginStep(driver)
+    login_step = InstagramLoginStep(driver, username, password)
     
     # Load cookies from string
     if not login_step.load_cookies_from_string(cookie_str):
         return False, "COOKIE_FORMAT_ERROR"
     
-    # Check if already logged in
-    driver.get("https://www.instagram.com/")
+    # Go directly to 2FA setup page
+    driver.get(login_step.two_fa_url)
     wait_dom_ready(driver, timeout=10)
     time.sleep(3) 
     
