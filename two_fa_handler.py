@@ -9,7 +9,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from config_utils import wait_dom_ready, wait_element, wait_and_click
 
 # Import Mail Handler
-from mail_handler_v2 import get_2fa_code_v2
+from mail_handler import get_2fa_code_v2
 
 class Instagram2FAStep:
     def __init__(self, driver):
@@ -72,6 +72,9 @@ class Instagram2FAStep:
             acc_selected = self._select_account_center_profile(target_username)
             if not acc_selected:
                 raise Exception("STOP_FLOW_2FA: Account selection failed")
+            
+            wait_dom_ready(self.driver, timeout=20)
+            time.sleep(2)
 
             # -------------------------------------------------
             # STEP 2: SCAN STATE & HANDLE EXCEPTIONS
@@ -82,6 +85,20 @@ class Instagram2FAStep:
             # Quét 15 lần (Logic gốc)
             for _ in range(15):
                 state = self._get_page_state()
+                
+                if state == 'UNKNOWN':
+                    try:
+                        body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+                        print(f"   [Step 4] UNKNOWN state - body preview: {body_text[:300]}...")
+                    except Exception as e:
+                        print(f"   [Step 4] Could not get body text: {e}")
+                
+                if state == 'SELECT_APP':
+                    try:
+                        body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+                        print(f"   [Step 4] SELECT_APP state - body preview: {body_text[:300]}...")
+                    except Exception as e:
+                        print(f"   [Step 4] Could not get body text for SELECT_APP: {e}")
                 
                 # UNUSUAL LOGIN FIX
                 if state == 'UNUSUAL_LOGIN':
@@ -111,7 +128,7 @@ class Instagram2FAStep:
                 if state in ['SELECT_APP', 'CHECKPOINT', 'ALREADY_ON', 'RESTRICTED', 'OTP_INPUT_SCREEN']: 
                     break
                 
-                time.sleep(0.5)
+                time.sleep(1)
 
             print(f"   [Step 4] Detected State: {state}")
 
@@ -334,31 +351,48 @@ class Instagram2FAStep:
 
     def _select_account_center_profile(self, target_username):
         acc_selected = False
+        target_lower = target_username.lower()
         for attempt in range(3):
             try:
                 wait_element(self.driver, By.XPATH, "//div[@role='button'] | //a[@role='link']", timeout=5)
-                clicked = self.driver.execute_script("""
-                    var target = arguments[0].toLowerCase();
-                    var els = document.querySelectorAll('div[role="button"], a[role="link"]');
-                    // Ưu tiên chọn tài khoản có username chính xác
-                    for (var i=0; i<els.length; i++) {
-                        var txt = els[i].innerText.toLowerCase();
-                        if (txt.includes(target) && txt.includes('instagram')) { 
-                            els[i].click(); return true; 
-                        }
-                    }
-                    // Fallback: Chọn bất kỳ tài khoản Instagram nào
-                    for (var i=0; i<els.length; i++) {
-                        if (els[i].innerText.toLowerCase().includes('instagram')) { 
-                            els[i].click(); return true; 
-                        }
-                    }
-                    return false;
-                """, target_username)
-                if clicked: 
-                    acc_selected = True; wait_dom_ready(self.driver, timeout=5); break
-                else: time.sleep(1)
-            except: time.sleep(1)
+                elements = self.driver.find_elements(By.XPATH, "//div[@role='button'] | //a[@role='link']")
+                print(f"   [Step 4] Found {len(elements)} account elements.")
+                for el in elements:
+                    txt = el.text.lower()
+                    # print(f"   [Step 4] Element text: '{txt}'")
+                    if target_lower in txt and 'instagram' in txt:
+                        print(f"   [Step 4] Clicking exact match for {target_username}")
+                        el.click()
+                        acc_selected = True
+                        wait_dom_ready(self.driver, timeout=5)
+                        break
+                if not acc_selected:
+                    # Fallback: any with username
+                    for el in elements:
+                        txt = el.text.lower()
+                        if target_lower in txt:
+                            # print(f"   [Step 4] Clicking fallback match for {target_username}")
+                            el.click()
+                            acc_selected = True
+                            wait_dom_ready(self.driver, timeout=5)
+                            break
+                if not acc_selected:
+                    # Fallback: any instagram
+                    for el in elements:
+                        txt = el.text.lower()
+                        if 'instagram' in txt:
+                            print(f"   [Step 4] Clicking any Instagram account")
+                            el.click()
+                            acc_selected = True
+                            wait_dom_ready(self.driver, timeout=5)
+                            break
+                if acc_selected:
+                    break
+                else:
+                    time.sleep(3)
+            except Exception as e:
+                print(f"   [Step 4] Attempt {attempt+1} failed: {e}")
+                time.sleep(3)
         if not acc_selected: 
             print("   [Step 4] Warning: Select Account failed (May already be inside).")
             return False
@@ -382,8 +416,8 @@ class Instagram2FAStep:
             if (body.includes("suspended") || body.includes("đình chỉ")) return 'SUSPENDED';
 
             if (body.includes("authentication is on") || body.includes("xác thực 2 yếu tố đang bật")) return 'ALREADY_ON';
-            
-            if (body.includes("help protect your account") || body.includes("authentication app")) return 'SELECT_APP';
+            if (body.includes("check your email")) return 'CHECKPOINT';
+            if (body.includes("help protect your account") || body.includes("authentication app") || body.includes("two-factor") || body.includes("2fa") || body.includes("security codes") || body.includes("authenticator")) return 'SELECT_APP';
 
             if (body.includes("check your whatsapp")) return 'WHATSAPP_REQUIRED';
             if (body.includes("check your sms")) return 'SMS_REQUIRED';
@@ -498,6 +532,7 @@ class Instagram2FAStep:
             raise Exception("STOP_FLOW_2FA: CHECKPOINT_MAIL: NO CODE")
 
     def _select_auth_app_method(self, current_state):
+        print(f"   [Step 4] _select_auth_app_method called with state: {current_state}")
         if self._get_page_state() == 'ALREADY_ON': return
         try:
             self.driver.execute_script("""
