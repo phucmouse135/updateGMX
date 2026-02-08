@@ -1,351 +1,48 @@
-# step1_login.py
-import json
+# step3_post_login.py
 import time
-import os
+import re
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from config_utils import wait_element, wait_and_click, wait_and_send_keys, wait_dom_ready
+from config_utils import wait_element, wait_and_click, wait_dom_ready
 
-class InstagramLoginStep:
-    def __init__(self, driver, username=None, password=None):
+class InstagramPostLoginStep:
+    def __init__(self, driver):
         self.driver = driver
-        self.username = username
-        self.password = password
-        self.base_url = "https://accountscenter.instagram.com/"
-        self.two_fa_url = "https://accountscenter.instagram.com/password_and_security/two_factor/"
-        self.count = 0
 
-    def load_cookies_from_string(self, cookie_str):
+    def process_post_login(self, username):
         """
-        Load cookies from a string (tab-separated or similar format).
+        Luồng chính xử lý sau khi Login thành công:
+        1. Xử lý các màn hình chắn (Cookie, Terms, Lỗi Page, Popup...).
+        2. Điều hướng vào Profile.
+        3. Crawl Dữ liệu (Post, Follower, Following).
+        4. Trích xuất Cookie mới.
         """
-        if not cookie_str:
-            print("   [Cookie Login] No cookie string provided.")
-            return False
-
-        try:
-            print("   [Cookie Login] Loading cookies from string...")
-            self.driver.get(self.base_url)  # Visit to set domain
-            
-            # Parse cookies from string, assuming format like name=value; name2=value2;
-            cookies = []
-            if ';' in cookie_str:
-                pairs = cookie_str.split(';')
-                for pair in pairs:
-                    if '=' in pair:
-                        name, value = pair.strip().split('=', 1)
-                        cookies.append({'name': name, 'value': value})
-            else:
-                # If not standard format, try to parse as JSON or other
-                try:
-                    data = json.loads(cookie_str)
-                    cookies = data.get("cookies", [])
-                except:
-                    print("   [Cookie Login] Cookie string format not recognized.")
-                    return False
-            
-            for cookie in cookies:
-                cookie_dict = {
-                    'name': cookie.get('name'),
-                    'value': cookie.get('value'),
-                    'domain': '.instagram.com',
-                    'path': '/',
-                    'secure': True
-                }
-                if 'expiry' in cookie:
-                    cookie_dict['expiry'] = cookie['expiry']
-                try:
-                    self.driver.add_cookie(cookie_dict)
-                except Exception as e:
-                    print(f"   [Cookie Login] Failed to add cookie {cookie.get('name')}: {e}")
-            
-            self.driver.refresh()
-            wait_dom_ready(self.driver, timeout=5)
-            return True
-        except Exception as e:
-            print(f"   [Cookie Login] Error loading cookies from string: {e}")
-            return False
-
-    def _wait_for_login_result(self, timeout=120):
-        print("   [Status Check] Waiting for login result...")
-        end_time = time.time() + timeout
+        print(f"[{username}]   [Step 3] Processing Post-Login for {username}...")
         
-        while time.time() < end_time:
-            status = self._detect_initial_status()
-            print(f"   [Status Check] Intermediate login status: {status}")
-            
-            if status == "FAIL_LOGIN_REDIRECTED_TO_PROFILE_SELECTION":
-                if self.password:
-                    self._handle_profile_selection_login()
-                    continue
-                else:
-                    return status
-            
-            # Nếu status đã rõ ràng (không phải Unknown/Retry) -> Return ngay
-            if status not in ["LOGGED_IN_UNKNOWN_STATE"]:
-                return status
-            
-            time.sleep(1)  # Reduced from 2 to 1 for speed
-            
-        return "TIMEOUT_LOGIN_CHECK"
-    def _detect_initial_status(self):
-        """
-        Quét DOM để xác định trạng thái sơ bộ sau khi nhấn Login.
-        (GIỮ NGUYÊN TEXT LỖI TỪ BẢN GỐC)
-        """
-        try:
-            wait_dom_ready(self.driver, timeout=5)
-            
-            # Check URL for 2FA page (direct access indicates successful login)
-            current_url = self.driver.current_url.lower()
-            if "accounts/login" in current_url:
-                return "COOKIE_DIE"
-            
-            try:
-                body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
-            except Exception as e:
-                error_str = str(e).lower()
-                if "stale" in error_str or "element" in error_str and "reference" in error_str:
-                    print("   [Status Check] Stale element when getting body text, retrying...")
-                    time.sleep(1)
-                    try:
-                        body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
-                    except Exception as e2:
-                        print("   [Status Check] Stale element retry also failed, returning unknown state")
-                        return "LOGGED_IN_UNKNOWN_STATE"
-                else:
-                    return f"ERROR_DETECT: {str(e)}"
-                
-            # The login information you entered is incorrect
-            if "the login information you entered is incorrect" in body_text or \
-                       "incorrect username or password" in body_text or \
-                        "thông tin đăng nhập bạn đã nhập không chính xác" in body_text:
-                return "LOGIN_FAILED_INCORRECT"
-            
-            if "choose a way to recover" in body_text:
-                return "RECOVERY_CHALLENGE"
-            
-            # Choose if we process your data for ads
-            if "choose if we process your data for ads" in body_text or "chọn nếu chúng tôi xử lý dữ liệu của bạn cho quảng cáo" in body_text:
-                return "DATA_PROCESSING_FOR_ADS"
-            
-            # Check for no internet connection
-            if "we couldn't connect to instagram" in body_text and "make sure you're connected to the internet" in body_text:
-                return "NOT_CONNECT_INSTAGRAM"
-            
-            # 1. Các trường hợp Exception / Checkpoint
-            if "enter the 6-digit code" in body_text and ("email" in body_text or "mail" in body_text):
-                return "CHECKPOINT_MAIL"
-            if "check your email" in body_text or " we sent to the email address" in body_text:
-                return "CHECKPOINT_MAIL"
-            
-            # Enter the 6-digit code we sent to the number ending in
-            if "enter the 6-digit code we sent to the number ending in" in body_text:
-                return "CHECKPOINT_PHONE"
-            
-            # enter your email
-            if "enter your email" in body_text or "please enter your email address to continue" in body_text:
-                return "DISABLE_ACCOUNT"
-            
-            # Log in on another device to continue
-            if "log in on another device to continue" in body_text or "đăng nhập trên thiết bị khác để tiếp tục" in body_text:
-                return "LOG_IN_ANOTHER_DEVICE"
-            
-            if "add phone number to get back into instagram" in body_text or "send confirmation" in body_text or "log into another account" in body_text or "we will send a confirmation code via sms to your phone." in body_text: 
-                return "SUSPENDED_PHONE"
-            # this was me / let us know if it was you
-            if "this was me" in body_text or "let us know if it was you" in body_text or "to secure your account" in body_text:
-                return "CONFIRM_TRUSTED_DEVICE"
-            
-            # yêu cầu đổi mật khẩu 
-            if "we noticed unusual activity" in body_text or "change your password" in body_text or "yêu cầu đổi mật khẩu" in body_text:
-                return "REQUIRE_PASSWORD_CHANGE"
-            
-            # Nếu đã vào trong (có Post/Follower/Nav bar)
-            if "posts" in body_text or "followers" in body_text or "search" in body_text or "home" in body_text:
-                return "LOGGED_IN_SUCCESS"
-
-            if("save your login info?" in body_text or "we can save your login info on this browser so you don't need to enter it again." in body_text or "lưu thông tin đăng nhập của bạn" in body_text or "save info" in body_text):
-                return "LOGGED_IN_SUCCESS"
-            
-            
-            
-            
-            
-            try:
-                wait_dom_ready(self.driver, timeout=5)
-                start_time = time.time()
-                last_url = self.driver.current_url
-                while True:
-                    try:
-                        body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
-                    except Exception as e:
-                        error_str = str(e).lower()
-                        if "stale" in error_str or ("element" in error_str and "reference" in error_str):
-                            print("   [Status Check] Stale element in status check loop, retrying...")
-                            time.sleep(1)
-                            continue
-                        else:
-                            raise e  # Re-raise to be caught by outer except
-                    current_url = self.driver.current_url
-
-                    # you need to request help logging in To secure your account, you need to request help logging in
-                    if "you need to request help logging in" in body_text or "to secure your account, you need to request help logging in" in body_text:
-                        return "GET_HELP_LOG_IN"
-                    
-                    # We Detected An Unusual Login Attempt 
-                    if ("we detected an unusual login attempt" in body_text or "to secure your account, we'll send you a security code." in body_text) :
-                        if "email" in body_text or "mail" in body_text:            
-                            return "CONTINUE_UNUSUAL_LOGIN"
-                        if "this was me" in body_text or "let us know if it was you" in body_text:
-                            return "CONFIRM_TRUSTED_DEVICE"
-                        return "CONTINUE_UNUSUAL_LOGIN_PHONE"
-                
-                    if "choose a way to recover" in body_text:
-                        return "RECOVERY_CHALLENGE"
-                    # 1. Các trường hợp Exception / Checkpoint
-                    if "check your email" in body_text or " we sent to the email address" in body_text:
-                        return "CHECKPOINT_MAIL"
-
-                    # Log in on another device to continue
-                    if "log in on another device to continue" in body_text or "đăng nhập trên thiết bị khác để tiếp tục" in body_text:
-                        return "LOG_IN_ANOTHER_DEVICE"
-                    
-                    # your account has been disabled
-                    if "your account has been disabled" in body_text:
-                        return "ACCOUNT_DISABLED"
-
-                    if "add phone number to get back into instagram" in body_text or "send confirmation" in body_text or "log into another account" in body_text or "we will send a confirmation code via sms to your phone." in body_text: 
-                        return "SUSPENDED_PHONE"
-
-                    # yêu cầu đổi mật khẩu 
-                    if "we noticed unusual activity" in body_text or "change your password" in body_text or "yêu cầu đổi mật khẩu" in body_text:
-                        return "REQUIRE_PASSWORD_CHANGE"
-                    # this was me / let us know if it was you
-                    if "this was me" in body_text or "let us know if it was you" in body_text or "to secure your account" in body_text:
-                        return "CONFIRM_TRUSTED_DEVICE"
-
-                    # Try another device to continue
-                    if "try another device" in body_text or "try another device to continue" in body_text or "can’t try another device?" in body_text:
-                        return "TRY_ANOTHER_DEVICE"
-
-                    if "suspended" in body_text or "đình chỉ" in body_text:
-                        return "SUSPENDED"
-
-                    # The login information you entered is incorrect
-                    if "the login information you entered is incorrect" in body_text or \
-                       "incorrect username or password" in body_text or \
-                        "thông tin đăng nhập bạn đã nhập không chính xác" in body_text:
-                        return "LOGIN_FAILED_INCORRECT"
-                    # Something went wrong
-                    if "something went wrong" in body_text or "something went wrong" in body_text:
-                        return "LOGIN_FAILED_SOMETHING_WENT_WRONG"
-
-                    # 2. Các trường hợp Thành công / Tiếp tục
-                    if "select your birthday" in body_text or "add your birthday" in body_text:
-                        return "BIRTHDAY_SCREEN"
-
-                    # 
-                    # check your text messages
-                    if "check your text messages" in body_text or "kiểm tra tin nhắn văn bản của bạn" in body_text:
-                        return "2FA_TEXT_MESSAGE"
-                    
-                    # if "allow the use of cookies" in body_text:
-                    #     return "COOKIE_CONSENT"
-                    
-                    
-                    
-                    # Help us confirm it's you
-                    if "help us confirm it's you" in body_text or "xác nhận đó là bạn" in body_text:
-                        return "CONFIRM_YOUR_IDENTITY"
-
-                    
-
-                    # SMS 2FA screen "Enter a 6-digit login code generated by an authentication app." or vietnamese
-                    if "mã đăng nhập 6 chữ số được tạo bởi ứng dụng xác thực" in body_text or "enter a 6-digit login code generated by an authentication app." in body_text:
-                        return "2FA_SMS"
-
-                    # Check your WhatsApp messages 
-                    if "check your whatsapp messages" in body_text or "kiểm tra tin nhắn whatsapp của bạn" in body_text or "we sent via whatsapp to" in body_text:
-                        return "2FA_WHATSAPP"
-
-
-                    # Confirm your info on the app 
-                    if "confirm your info on the app" in body_text:
-                        return "2FA_APP"
-
-                    # Use another profile => Văng về chọn tài khoản
-                    if "use another profile" in body_text or "Log into Instagram" in body_text:
-                        return "FAIL_LOGIN_REDIRECTED_TO_PROFILE_SELECTION"
-
-                    
-
-                    # Check your notifications  && Check your notifications there and approve the login to continue.
-                    if "check your notifications" in body_text or "xem thông báo của bạn" in body_text or "check your notifications there and approve the login to continue." in body_text:
-                        return "2FA_NOTIFICATIONS"
-                    
-                    # Nếu đã vào trong (có Post/Follower/Nav bar)
-                    if "posts" in body_text or "followers" in body_text or "search" in body_text or "home" in body_text or "suggested for you" in body_text or "more accounts" in body_text:
-                        return "LOGGED_IN_SUCCESS"
-
-                    if("save your login info?" in body_text or "we can save your login info on this browser so you don't need to enter it again." in body_text or "lưu thông tin đăng nhập của bạn" in body_text):
-                        return "LOGGED_IN_SUCCESS"
-                    
-                    # Log into Instagram , password input 
-                    if "log into instagram" in body_text or "password" in body_text or "mobile number, username, or email" in body_text or "log in with facebook" in body_text or "create new account" in body_text:
-                        self.count += 1
-                        if self.count >=20:
-                            return "LOGIN_FAILED"
-                    
-                    # Nếu vẫn còn ô password -> Login chưa qua (có thể đang loading)
-                    if len(self.driver.find_elements(By.CSS_SELECTOR, "input[type='password']")) > 0:
-                        self.count += 1
-                        if self.count >=20:
-                            return "LOGIN_FAILED_RETRY"
-
-                    # Nếu không xác định được trạng thái, kiểm tra loading hoặc url đứng yên
-                    loading_selectors = [
-                        "div[role='progressbar']", "div[aria-busy='true']", "._ab8w", ".loading-spinner", "[data-testid='loading-indicator']"
-                    ]
-                    loading_found = False
-                    for sel in loading_selectors:
-                        try:
-                            if len(self.driver.find_elements(By.CSS_SELECTOR, sel)) > 0:
-                                loading_found = True
-                                break
-                        except:
-                            pass
-
-                    # Nếu có loading hoặc url không đổi thì tiếp tục chờ
-                    if loading_found or current_url == last_url:
-                        if time.time() - start_time > 120:
-                            break
-                        time.sleep(1)
-                        last_url = current_url
-                        continue
-
-                    # Nếu không xác định được trạng thái, trả về Unknown State
-                    break
-                return "LOGGED_IN_UNKNOWN_STATE"
-            except Exception as e:
-                return f"ERROR_DETECT: {str(e)}" 
-        except Exception as e:
-            return f"ERROR_DETECT_EXCEPTION: {str(e)}"
+        # 1. Xử lý các Popup/Màn hình chắn (Vòng lặp check)
+        self._handle_interruptions()
         
-
-    def _handle_profile_selection_login(self):
-        try:
-            print("   [Step 1] Handling profile selection login...")
-            # Click "Log into Instagram" or "Continue"
-            login_button = wait_element(self.driver, By.XPATH, "//*[contains(text(), 'Log into Instagram')]", timeout=10)
-            wait_and_click(self.driver, login_button)
-            # Wait for password input
-            password_input = wait_element(self.driver, By.CSS_SELECTOR, "input[type='password']", timeout=10)
-            wait_and_send_keys(self.driver, password_input, self.password + Keys.RETURN)
-            print("   [Step 1] Entered password and submitted.")
-        except Exception as e:
-            print(f"   [Step 1] Failed to handle profile selection login: {e}")
-            raise
+        # 1.5. Đảm bảo đã vào Instagram trước khi navigate
+        self.driver.get("https://www.instagram.com/")
+        wait_dom_ready(self.driver, timeout=10)
+        
+        self._handle_interruptions()
+        self._ensure_instagram_ready()
+        
+        
+        
+        # 2. Điều hướng vào Profile
+        self._navigate_to_profile(username)
+        
+        # las t check các popup lần nữa trước khi crawl
+        self._handle_interruptions()
+        
+        # 3. Crawl Dữ liệu
+        data = self._crawl_data(username)
+        
+        # 4. Lấy Cookie mới
+        data['cookie'] = self._get_cookie_string()
+        
+        return data
 
     def _handle_interruptions(self):
         """
@@ -353,35 +50,6 @@ class InstagramLoginStep:
         Gộp kiểm tra Popup và kiểm tra Home vào 1 lần gọi JS để tăng tốc độ.
         """
         print("   [Step 3] Starting Aggressive Popup Scan...")
-        
-        # QUICK CHECK: Only proceed if there are actually popups to handle
-        try:
-            has_popups = self.driver.execute_script("""
-                // Check for visible dialogs/modals
-                var dialogs = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], div[aria-modal="true"]');
-                var hasVisibleDialog = Array.from(dialogs).some(d => d.offsetParent !== null && d.offsetWidth > 0 && d.offsetHeight > 0);
-                
-                // Check for overlays that might block interaction
-                var overlays = document.querySelectorAll('div[aria-hidden="false"], div[data-testid*="modal"], div[style*="z-index"]');
-                var hasVisibleOverlay = Array.from(overlays).some(o => {
-                    var style = window.getComputedStyle(o);
-                    return style.display !== 'none' && style.visibility !== 'hidden' && o.offsetParent !== null && o.offsetWidth > 0 && o.offsetHeight > 0;
-                });
-                
-                // Check for specific popup keywords in body text
-                var bodyText = (document.body && document.body.innerText.toLowerCase()) || '';
-                var hasPopupKeywords = ['get started', 'bắt đầu', 'agree', 'đồng ý', 'next', 'tiếp', 'allow all cookies', 'cho phép tất cả', 'confirm your account', 'xác nhận tài khoản'].some(k => bodyText.includes(k));
-                
-                return hasVisibleDialog || hasVisibleOverlay || hasPopupKeywords;
-            """)
-            
-            if not has_popups:
-                print("   [Step 3] No popups detected. Skipping popup handling.")
-                return  # Exit early if no popups found
-        
-        except Exception as e:
-            print(f"   [Step 3] Error in popup detection: {e}")
-            # Continue with normal flow if detection fails
         
         # Check for ad subscription popup and reload if found
         
@@ -625,7 +293,7 @@ class InstagramLoginStep:
                     try:
                         # Check again for any remaining dialogs or overlays
                         final_check = self.driver.execute_script("""
-                            var dialogs = document.querySelectorAll('div[role='dialog'], div[role='alertdialog'], div[aria-modal='true']');
+                            var dialogs = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], div[aria-modal="true"]');
                             var hasVisibleDialog = Array.from(dialogs).some(d => d.offsetParent !== null && d.getAttribute('aria-hidden') !== 'true');
                             
                             // Check for overlays that might block interaction
@@ -916,37 +584,251 @@ class InstagramLoginStep:
         except:
             return False
 
+    def _ensure_instagram_ready(self):
+        """Đảm bảo đã vào Instagram và sẵn sàng để navigate."""
+        print("   [Step 3] Ensuring Instagram is ready...")
+        
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                current_url = self.driver.current_url
+                print(f"   [Step 3] Current URL: {current_url}")
+                
+                # Check if we're on Instagram domain
+                if "instagram.com" not in current_url:
+                    print("   [Step 3] Not on Instagram domain, navigating to home...")
+                    self.driver.get("https://www.instagram.com/")
+                    wait_dom_ready(self.driver, timeout=10)
+                    time.sleep(3)
+                    continue
+                
+                # Check for basic Instagram elements
+                body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+                
+                # If we see login form, something went wrong
+                if "log in" in body_text or "username" in body_text or "password" in body_text:
+                    print("   [Step 3] Detected login form, something went wrong. Refreshing...")
+                    self.driver.refresh()
+                    wait_dom_ready(self.driver, timeout=10)
+                    time.sleep(3)
+                    continue
+                
+                # Check for common Instagram elements
+                instagram_indicators = [
+                    "home", "search", "explore", "reels", "messages", 
+                    "notifications", "create", "profile", "posts", "followers"
+                ]
+                
+                found_indicators = sum(1 for indicator in instagram_indicators if indicator in body_text)
+                
+                if found_indicators >= 3:
+                    print(f"   [Step 3] Instagram ready (found {found_indicators} indicators)")
+                    return True
+                else:
+                    print(f"   [Step 3] Instagram not ready yet (found {found_indicators} indicators), waiting...")
+                    time.sleep(2)
+                    
+            except Exception as e:
+                print(f"   [Step 3] Error checking Instagram readiness: {e}")
+                time.sleep(2)
+        
+        print("   [Step 3] Warning: Could not confirm Instagram readiness, proceeding anyway")
+        return False
 
-def login_instagram_via_cookie(driver, cookie_str, username=None, password=None):
-    """
-    Login to Instagram using cookies from string and go directly to 2FA setup.
-    Returns: (bool, status_string)
-    """
-    login_step = InstagramLoginStep(driver, username, password)
+    def _navigate_to_profile(self, username):
+        """Truy cập thẳng URL profile để đảm bảo vào đúng trang."""
+        print(f"   [Step 3] Navigating to Profile: {username}...")
+        
+        # Luôn truy cập thẳng URL để tránh lỗi click icon
+        profile_url = f"https://www.instagram.com/{username}/"
+        self.driver.get(profile_url)
+        
+        wait_dom_ready(self.driver, timeout=15)
+        time.sleep(3)  # Wait for dynamic content
+        
+        # Chờ Username xuất hiện (Confirm đã vào đúng trang), retry nếu cần
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            try:
+                current_url = self.driver.current_url
+                print(f"   [Step 3] Attempt {attempt+1}/{max_attempts} - Current URL: {current_url}")
+                
+                # Check if we're on the correct profile URL
+                if username.lower() not in current_url.lower():
+                    print(f"   [Step 3] URL mismatch, expected username '{username}' in URL")
+                    self.driver.get(profile_url)
+                    wait_dom_ready(self.driver, timeout=10)
+                    time.sleep(2)
+                    continue
+                
+                # Check for profile-specific elements
+                profile_indicators = [
+                    f"@{username}", username, "posts", "followers", "following"
+                ]
+                
+                body_text = self.driver.find_element(By.TAG_NAME, "body").text
+                
+                # Check if profile loaded
+                username_found = any(indicator in body_text for indicator in profile_indicators)
+                
+                if username_found:
+                    print(f"   [Step 3] Profile page confirmed for {username}")
+                    
+                    # Additional check: look for profile picture or bio area
+                    try:
+                        profile_elements = self.driver.find_elements(By.CSS_SELECTOR, 
+                            "img[alt*='" + username + "'], div[data-testid='user-biography'], header section")
+                        if profile_elements:
+                            print("   [Step 3] Profile elements found, navigation successful")
+                            return True
+                    except:
+                        pass
+                    
+                    return True
+                
+                # Check for error pages
+                if "sorry, this page isn't available" in body_text.lower():
+                    print(f"   [Step 3] Profile not found or private: {username}")
+                    return False
+                
+                if "this account is private" in body_text.lower():
+                    print(f"   [Step 3] Private account: {username}")
+                    return False
+                
+                print(f"   [Step 3] Profile not loaded yet, attempt {attempt+1}/{max_attempts}")
+                time.sleep(2)
+                
+            except Exception as e:
+                print(f"   [Step 3] Error checking profile: {e}")
+                time.sleep(2)
+        
+        print(f"   [Step 3] Warning: Could not confirm profile page for {username}, proceeding anyway")
+        return False
 
-    # Step 1: Load cookies from string
-    print("   [Step 1] Loading cookies and checking login status...")
-    if not login_step.load_cookies_from_string(cookie_str):
-        return False, "COOKIE_FORMAT_ERROR"
+    def _crawl_data(self, username):
+        print(f"   [Step 3] Crawling data for {username}...")
+        
+        # Verify we're on the correct profile page before crawling
+        current_url = self.driver.current_url
+        if username.lower() not in current_url.lower():
+            print(f"   [Step 3] ERROR: Not on profile page for {username}. Current URL: {current_url}")
+            return {"posts": "0", "followers": "0", "following": "0"}
+        
+        final_data = {"posts": "0", "followers": "0", "following": "0"}
+        
+        time.sleep(1)
+        
+        js_crawl = """
+            function getInfo() {
+                let res = {posts: "0", followers: "0", following: "0", source: "none"};
+                
+                // 1. DÙNG MỎ NEO LINK FOLLOWERS (Tương thích cả UL/LI và DIV)
+                let folLink = document.querySelector("a[href*='followers']");
+                
+                if (folLink) {
+                    // CÁCH A: Cấu trúc DIV
+                    let wrapper = folLink.closest('div'); 
+                    if (wrapper && wrapper.parentElement) {
+                        let container = wrapper.parentElement;
+                        let divs = Array.from(container.children).filter(el => el.tagName === 'DIV');
+                        if (divs.length >= 3) {
+                            res.posts = divs[0].innerText;
+                            res.followers = divs[1].innerText;
+                            res.following = divs[2].innerText;
+                            res.source = "div_structure";
+                            return res;
+                        }
+                    }
+                    // CÁCH B: Cấu trúc UL/LI
+                    let ulContainer = folLink.closest("ul");
+                    if (ulContainer) {
+                        let items = ulContainer.querySelectorAll("li");
+                        if (items.length >= 3) {
+                            res.posts = items[0].innerText;
+                            res.followers = items[1].innerText;
+                            res.following = items[2].innerText;
+                            res.source = "ul_structure";
+                            return res;
+                        }
+                    }
+                }
 
-    # Step 2: Navigate to 2FA setup page to verify login
-    print("   [Step 2] Navigating to 2FA setup page...")
-    driver.get(login_step.two_fa_url)
-    wait_dom_ready(driver, timeout=10)
-    time.sleep(3)
+                // 2. FALLBACK: META TAG
+                try {
+                    let meta = document.querySelector('meta[property="og:description"]') || document.querySelector('meta[name="description"]');
+                    if (meta) {
+                        res.raw_meta = meta.getAttribute('content');
+                        res.source = "meta";
+                        return res;
+                    }
+                } catch(e) {}
 
-    # Step 3: Check login status
-    print("   [Step 3] Checking login status...")
-    print("   [Status Check] Starting login verification...")
-    status = login_step._wait_for_login_result(timeout=60)
-    print(f"   [Status Check] Final login status: {status}")
+                return res;
+            }
+            return getInfo();
+        """
 
-    if status == "LOGGED_IN_SUCCESS":
-        print("   [Step 4] Login successful - checking for post-login popups...")
-        # Handle any post-login popups
-        login_step._handle_interruptions()
-        print("   [Step 5] Ready for 2FA setup...")
-        return True, "SUCCESS"
-    else:
-        print(f"   [Login Failed] Status: {status}")
-        return False, status
+        # Hàm làm sạch số (100 posts -> 100)
+        def clean_num(val):
+            if not val: return "0"
+            val = str(val).replace("\n", " ").strip()
+            m = re.search(r'([\d.,]+[kKmM]?)', val)
+            return m.group(1) if m else "0"
+
+        def parse_meta(text):
+            if not text: return "0", "0", "0"
+            text = text.lower().replace(",", "").replace(".", ".")
+            p = re.search(r'(\d+[km]?)\s+(posts|bài viết|beiträge)', text)
+            f1 = re.search(r'(\d+[km]?)\s+(followers|người theo dõi)', text)
+            f2 = re.search(r'(\d+[km]?)\s+(following|đang theo dõi)', text)
+            if not p: p = re.search(r'(posts|bài viết)\s+(\d+[km]?)', text)
+            return (p.group(1) if p else "0"), (f1.group(1) if f1 else "0"), (f2.group(1) if f2 else "0")
+
+        for i in range(1, 4):
+            try:
+                time.sleep(1.5)
+                raw_js = self.driver.execute_script(js_crawl)
+                
+                p, f1, f2 = "0", "0", "0"
+                
+                # Ưu tiên nguồn cấu trúc (DIV hoặc UL)
+                if raw_js and raw_js.get("source") in ["div_structure", "ul_structure"]:
+                    p = clean_num(raw_js.get("posts"))
+                    f1 = clean_num(raw_js.get("followers"))
+                    f2 = clean_num(raw_js.get("following"))
+                    print(f"   [Step 3] Crawled via DOM ({raw_js.get('source')}): P={p}, F1={f1}, F2={f2}")
+
+                # Nguồn Meta Tag
+                elif raw_js and raw_js.get("source") == "meta":
+                    p, f1, f2 = parse_meta(raw_js.get("raw_meta"))
+                    print(f"   [Step 3] Crawled via META: P={p}, F1={f1}, F2={f2}")
+
+                temp_data = {"posts": p, "followers": f1, "following": f2}
+
+                # Điều kiện chấp nhận: Ít nhất 1 trường có dữ liệu
+                if temp_data["followers"] != "0" or temp_data["posts"] != "0" or temp_data["following"] != "0":
+                    final_data = temp_data
+                    print(f"   [Step 3] Success (Attempt {i}): {final_data}")
+                    break
+                else:
+                    print(f"   [Step 3] Attempt {i}: Data empty. Retrying...")
+
+            except Exception as e:
+                print(f"   [Step 3] Crawl Error (Attempt {i}): {e}")
+
+        return final_data
+
+    def _get_cookie_string(self):
+        """Lấy toàn bộ cookie hiện tại và gộp thành chuỗi, với chuẩn hóa."""
+        try:
+            cookies = self.driver.get_cookies()
+            # Chuẩn hóa: loại bỏ khoảng trắng và encode value
+            import urllib.parse
+            cookie_parts = []
+            for c in cookies:
+                name = c['name']
+                value = urllib.parse.quote(c['value'].strip())
+                cookie_parts.append(f"{name}={value}")
+            return "; ".join(cookie_parts)
+        except:
+            return ""

@@ -57,9 +57,8 @@ def process_account(line_data):
             # 2. Login Instagram
             if login_instagram_via_cookie(driver, cookie_str):
                 
-                # 3. Setup 2FA & Get Key
-                # Truyền đúng email user/pass của GMX vào đây
-                print(Fore.CYAN + f"[{username}] Getting 2FA...")
+                # 3. Setup 2FA & Get Key (Step 4)
+                print(Fore.CYAN + f"[{username}] Step 4: Setting up 2FA...")
                 
                 instagram_2fa = Instagram2FAStep(driver)
                 secret_key = instagram_2fa.setup_2fa(email_user, email_pass, target_username=username)

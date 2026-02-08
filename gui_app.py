@@ -208,9 +208,15 @@ class AutomationToolGUI:
             
             # Kiểm tra cột 2FA (Index 4) để đánh dấu success có sẵn
             two_fa_data = row_data[4].strip()
-            is_done = len(two_fa_data) > 5 and "ERROR" not in two_fa_data.upper()
-            note = "Done: skip" if is_done else "Pending"
-            tag = "Success" if is_done else "Pending"
+            if "ERROR" in two_fa_data.upper():
+                note = f"Failed: {two_fa_data.replace('ERROR_2FA:', '').strip()}"
+                tag = "Fail"
+            elif len(two_fa_data) > 5:
+                note = "Done: skip"
+                tag = "Success"
+            else:
+                note = "Pending"
+                tag = "Pending"
             
             # [ID] + [12 DATA] + [NOTE] = 14 CỘT (Khớp 100% self.columns)
             iid = self.tree.insert("", "end", values=[cnt] + row_data + [note], tags=(tag,))
@@ -350,7 +356,7 @@ class AutomationToolGUI:
         self.lbl_progress.config(text=f"{done}/{self.stats_total.get()}")
 
     def start_process(self):
-        items = [i for i in self.tree.get_children() if self.tree.item(i,"tags")[0]!="Success"]
+        items = [i for i in self.tree.get_children() if self.tree.item(i,"tags")[0] not in ["Success", "Fail"]]
         if not items: return messagebox.showinfo("Info","No pending tasks.")
         self.is_running = True; self.btn_start.config(state="disabled"); self.btn_stop.config(state="normal")
         self.stats_processed.set(0); self.stats_total.set(len(items)); self.stats_running.set(0); self.update_stats()

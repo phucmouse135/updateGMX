@@ -12,7 +12,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from config_utils import wait_dom_ready, wait_element, wait_and_click
 
 # Import Mail Handler
-from mail_handler import get_2fa_code_v2
+from mail_handler_v2 import get_2fa_code_v2
 
 class Instagram2FAStep:
     def __init__(self, driver):
