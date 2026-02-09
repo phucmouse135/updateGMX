@@ -10,12 +10,14 @@ from concurrent.futures import ThreadPoolExecutor
 # --- INTEGRATION IMPORTS ---
 try:
     from config_utils import SafeWebDriver, ensure_chromedriver
-    from ig_login import login_instagram_via_cookie
-    from two_fa_handler import Instagram2FAStep
+    from step1_login import InstagramLoginStep
+    from step2_exceptions import InstagramExceptionStep
+    from step4_2fa import Instagram2FAStep
 except ImportError as e:
     print(f"Backend modules missing: {e}")
     SafeWebDriver = None
-    login_instagram_via_cookie = None
+    InstagramLoginStep = None
+    InstagramExceptionStep = None
     Instagram2FAStep = None
 
 class AutomationToolGUI:
@@ -70,7 +72,21 @@ class AutomationToolGUI:
         if SafeWebDriver:
             threading.Thread(target=ensure_chromedriver, daemon=True).start()
 
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.create_layout()
+
+    def on_closing(self):
+        """Handle window closing event"""
+        if self.is_running:
+            if not messagebox.askyesno("Quit", "Tasks are running. Force quit?"):
+                return
+        
+        self.is_running = False
+        try:
+            self.root.destroy()
+        except: pass
+        import os
+        os._exit(0)  # Force kill all threads/processes
 
     def create_layout(self):
         main_frame = ttk.Frame(self.root)
@@ -232,11 +248,17 @@ class AutomationToolGUI:
 
     def calculate_window_rect(self, slot_id, max_slots, screen_width, screen_height):
         try:
-            cols = math.ceil(math.sqrt(max_slots))
-            if max_slots > 4: cols = 5
-            rows = math.ceil(max_slots / cols)
-            win_w = int(screen_width / cols); win_h = int((screen_height - 50) / rows)
-            return ((slot_id % cols) * win_w, (slot_id // cols) * win_h, win_w, win_h)
+            # Chia màn hình chỉ theo chiều ngang (Side-by-side), chiều dọc Full (trừ taskbar)
+            cols = max_slots
+            rows = 1
+            
+            win_w = int(screen_width / cols)
+            win_h = int(screen_height - 50) # Trừ taskbar 50px
+            
+            x_pos = (slot_id % cols) * win_w
+            y_pos = 0 # Luôn bắt đầu từ đỉnh
+            
+            return (x_pos, y_pos, win_w, win_h)
         except: return None
 
     # ================== WORKER LOGIC ==================
@@ -271,11 +293,31 @@ class AutomationToolGUI:
                 with SafeWebDriver(headless=self.headless_var.get(), window_rect=rect) as driver:
                     self.root.after(0, lambda: self.update_row_status(iid, "Logging in...", "Running"))
                     
-                    # Login
-                    login_ok, login_msg = login_instagram_via_cookie(driver, cookie)
+                    # --- NEW FLOW: Step 1 (Cookie Login) ---
+                    step1 = InstagramLoginStep(driver, username)
+                    login_status = step1.login_with_cookie(cookie, username)
                     
-                    if login_ok:
-                        # 2FA Setup
+                    # --- Step 2 (Exception Handling) ---
+                    self.root.after(0, lambda: self.update_row_status(iid, f"Verifying ({login_status})...", "Running"))
+                    step2 = InstagramExceptionStep(driver)
+                    # Mapping args: (status, ig_username, gmx_user, gmx_pass, linked_mail=None, ig_password=None...)
+                    # Fallback IG Password to row_data[3] (IG PASS) or Mail Pass
+                    ig_actual_pass = password if password else gmx_pass
+                    
+                    if not gmx_user: gmx_user = ""
+                    if not gmx_pass: gmx_pass = ""
+
+                    final_status = "UNKNOWN"
+                    try:
+                        final_status = step2.handle_status(login_status, username, gmx_user, gmx_pass, linked_mail=linked_mail, ig_password=ig_actual_pass)
+                    except Exception as e_step2:
+                        final_status = f"EXCEPTION_STEP2: {str(e_step2)}"
+
+                    success_statuses = ["LOGGED_IN", "SUCCESS", "LOGGED_IN_SUCCESS", "TERMS_AGREEMENT", "NEW_MESSAGING_TAB", "COOKIE_CONSENT"]
+                    
+                    if final_status in success_statuses or (isinstance(final_status, str) and "SUCCESS" in final_status):
+                        
+                        # --- Step 4 (2FA Setup) ---
                         self.root.after(0, lambda: self.update_row_status(iid, "Setup 2FA...", "Running"))
                         try:
                             if Instagram2FAStep:
@@ -293,14 +335,7 @@ class AutomationToolGUI:
                             # Lấy nội dung lỗi (bỏ prefix)
                             raw_err = str(result).replace("FAIL: ", "").replace("ERROR_2FA: ", "").replace("STOP_FLOW_2FA:", "").strip()
                             note = f"{raw_err} {time.time() - start_time:.1f}s"
-                            # [FIX] Đảm bảo không ghi lỗi vào cột key (index 4 trong row_data tương ứng column 2FA)
-                            # Cột 2FA trong row_data là row_data[4] (0:UID, 1:LINK, 2:USER, 3:PASS, 4:2FA...)
-                            # Không gán giá trị gì vào row_data[4] khi fail
                         elif result == "ALREADY_2FA_ON":
-                             status, note, final_key = "Success", "Done: skip", "Already On" 
-                             # Ở đây có thể người dùng muốn ghi Already On vào cột 2FA hoặc Note?
-                             # Theo yêu cầu "FAIL: ALREADY_ON" -> Note. 
-                             # Nếu logic trả về "ALREADY_2FA_ON" (logic cũ) thì sửa thành Fail tương tự
                              status = "Fail"
                              note = f"ALREADY_ON {time.time() - start_time:.1f}s"
                         else:
@@ -309,7 +344,7 @@ class AutomationToolGUI:
                     else:
                         # Xử lý lỗi Login và Ghi NOTE
                         status = "Fail"
-                        note = f"{login_msg} {time.time() - start_time:.1f}s"  # Hiển thị chính xác mã lỗi + thời gian
+                        note = f"{final_status} {time.time() - start_time:.1f}s"  
                     
                     break
 

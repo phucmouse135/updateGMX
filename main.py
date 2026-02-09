@@ -3,8 +3,9 @@ import threading
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from config_utils import get_driver
-from ig_login import login_instagram_via_cookie
-from two_fa_handler import Instagram2FAStep
+from step1_login import InstagramLoginStep
+from step2_exceptions import InstagramExceptionStep
+from step4_2fa import Instagram2FAStep
 from colorama import Fore, init
 
 init(autoreset=True)
@@ -54,24 +55,43 @@ def process_account(line_data):
             # 1. Initialize Browser (Config tối ưu đã có ở câu trả lời trước)
             driver = get_driver(headless=True) 
             
-            # 2. Login Instagram
-            login_success, login_status = login_instagram_via_cookie(driver, cookie_str, username=username)
-            if login_success:
+            # 2. Login Instagram via Cookie (Step 1)
+            step1 = InstagramLoginStep(driver, username=username)
+            status = step1.login_with_cookie(cookie_str, username)
+            
+            # 3. Handle Status (Step 2)
+            step2 = InstagramExceptionStep(driver)
+            ig_password = parts[4] if len(parts) > 4 else ""
+            
+            # Handle potential None for emails
+            safe_email_user = email_user if email_user else ""
+            safe_email_pass = email_pass if email_pass else ""
+            
+            try:
+                final_status = step2.handle_status(status, username, safe_email_user, safe_email_pass, ig_password=ig_password)
+            except Exception as e_step2:
+                final_status = f"EXCEPTION_STEP2: {str(e_step2)}"
+                print(Fore.RED + f"[{username}] Step 2 Exception: {str(e_step2)}")
+
+            # Check Success
+            success_statuses = ["LOGGED_IN", "SUCCESS", "LOGGED_IN_SUCCESS", "TERMS_AGREEMENT", "NEW_MESSAGING_TAB", "COOKIE_CONSENT"]
+            
+            if final_status in success_statuses or (isinstance(final_status, str) and "SUCCESS" in final_status):
                 
-                # 3. Setup 2FA & Get Key (Step 4)
+                # 4. Setup 2FA & Get Key (Step 4)
                 print(Fore.CYAN + f"[{username}] Step 4: Setting up 2FA...")
                 
                 instagram_2fa = Instagram2FAStep(driver)
-                secret_key = instagram_2fa.setup_2fa(email_user, email_pass, target_username=username)
+                secret_key = instagram_2fa.setup_2fa(safe_email_user, safe_email_pass, target_username=username)
                 
-                if secret_key.startswith("FAIL:"):
-                    # Update NOTE column for all FAIL errors
+                if str(secret_key).startswith("FAIL:") or "STOP_FLOW" in str(secret_key):
+                    # Update NOTE column for FAIL errors
                     while len(parts) <= 12: parts.append("")
-                    parts[12] = secret_key.replace("FAIL: ", "")  # Remove prefix for cleaner note
-                    result_to_save = None  # Explicitly set None to avoid writing to IG2FA
+                    parts[12] = str(secret_key).replace("FAIL: ", "")
+                    result_to_save = None
                     print(Fore.YELLOW + f"[{username}] 2FA setup failed: {secret_key}. Updated NOTE.")
                 else:
-                    # 4. Success
+                    # Success
                     result_to_save = secret_key
                     print(Fore.GREEN + f"[{username}] SUCCESS! Key: {secret_key}")
                 
@@ -82,29 +102,24 @@ def process_account(line_data):
                 break 
             
             else:
-                # Handle login failure
-                if login_status == "ALREADY_ON":
-                    # Update NOTE column (assume index 12)
+                # Handle status failure from Step 2
+                print(Fore.RED + f"[{username}] Login/Verification failed: {final_status}")
+                if "ALREADY_ON" in str(final_status):
                     while len(parts) <= 12: parts.append("")
                     parts[12] = "ALREADY_ON"
-                    result_to_save = None  # Explicitly set None
-                    print(Fore.YELLOW + f"[{username}] 2FA already enabled. Updated NOTE.")
-                    
-                    if driver: 
+                    result_to_save = None
+                    if driver:
                         try: driver.quit()
                         except: pass
-                    driver = None
-                    break # Stop retrying for ALREADY_ON
+                        driver = None
+                    break
                 else:
-                    result_to_save = f"LOGIN_FAIL: {login_status}"
-                    print(Fore.RED + f"[{username}] Login failed: {login_status}")
-                
-                    if driver: 
+                    result_to_save = f"LOGIN_FAIL: {final_status}"
+                    if driver:
                         try: driver.quit()
                         except: pass
-                    driver = None
+                        driver = None
                     
-                    # Retry logic: Only break if max retries reached
                     if attempt < MAX_RETRIES:
                         print(Fore.YELLOW + f"[{username}] Retrying... ({attempt}/{MAX_RETRIES})")
                         continue
