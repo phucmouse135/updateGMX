@@ -18,6 +18,7 @@ class Instagram2FAStep:
     def __init__(self, driver):
         self.driver = driver
         self.target_url = "https://accountscenter.instagram.com/password_and_security/two_factor/"
+        self.target_username = None  # Will be set in setup_2fa
 
     def _safe_element_action(self, action_func, max_retries=3, delay=0.5):
         """
@@ -30,7 +31,7 @@ class Instagram2FAStep:
                 return action_func()
             except StaleElementReferenceException:
                 if attempt < max_retries - 1:
-                    print(f"   [Step 4] Element stale, retrying ({attempt+1}/{max_retries})...")
+                    print(f"   [{self.target_username}] [Step 4] Element stale, retrying ({attempt+1}/{max_retries})...")
                     time.sleep(delay)
                 else:
                     raise
@@ -68,12 +69,17 @@ class Instagram2FAStep:
             return False
         except Exception:
             return False
+        
+    def format_key_groups(self, key):
+        key_nospaces = key.replace(" ", "")
+        return " ".join([key_nospaces[i:i+4] for i in range(0, len(key_nospaces), 4)])
 
     def setup_2fa(self, gmx_user, gmx_pass, target_username, linked_mail=None):
         """
         Setup 2FA Flow - Logic gốc bảo toàn, thêm tối ưu chống treo.
         """
         try: 
+            self.target_username = target_username
             print(f"   [{target_username}] [Step 4] Accessing settings...")
             print(f"   [{target_username}] [Step 4] Starting 2FA Setup for {target_username}...")
             
@@ -170,7 +176,7 @@ class Instagram2FAStep:
                 raise Exception("STOP_FLOW_2FA: ACCOUNT_SUSPENDED")
             if state == 'ALREADY_ON': 
                 print(f"   [{target_username}] [Step 4] 2FA is already ON.")
-                return "ALREADY_2FA_ON"
+                raise Exception("STOP_FLOW_2FA: ALREADY_ON")
 
             # -------------------------------------------------
             # STEP 2.5: HANDLE CHECKPOINT (INTERNAL)
@@ -211,7 +217,11 @@ class Instagram2FAStep:
 
             # Prepare TOTP for later use (SHA1, 6 digits, 30s interval)
             key_for_otp = secret_key.replace(" ","")
-            totp = pyotp.TOTP(key_for_otp, interval=30, digits=6, digest=hashlib.sha1)
+            try:
+                totp = pyotp.TOTP(key_for_otp, interval=30, digits=6, digest=hashlib.sha1)
+            except Exception as e:
+                print(f"   [{target_username}] [Step 4] Invalid secret key for TOTP: {e}")
+                raise Exception("STOP_FLOW_2FA: INVALID_SECRET_KEY")
 
             # Callback GUI
             if hasattr(self, 'on_secret_key_found') and callable(self.on_secret_key_found):
@@ -410,7 +420,7 @@ class Instagram2FAStep:
             # Trả về nội dung lỗi để điền vào cột 2FA
             # Loại bỏ prefix "STOP_FLOW_2FA: " cho ngắn gọn nếu muốn
             clean_err = err_msg.replace("STOP_FLOW_2FA: ", "").strip()
-            return f"ERROR_2FA: {clean_err}"
+            return f"FAIL: {clean_err}"
 
     # ==========================================
     # CORE HELPERS
@@ -478,23 +488,23 @@ class Instagram2FAStep:
                     try:
                         body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
                         if target_lower in body_text or target_username in body_text:
-                            print(f"   [Step 4] Verified: Account {target_username} selected")
+                            print(f"   [{self.target_username}] [Step 4] Verified: Account {target_username} selected")
                             acc_selected = True
                         else:
-                            print(f"   [Step 4] Verification failed: Username not found in page, retrying...")
+                            print(f"   [{self.target_username}] [Step 4] Verification failed: Username not found in page, retrying...")
                             continue  # Try again
                     except:
-                        print(f"   [Step 4] Verification error, assuming selected")
+                        print(f"   [{self.target_username}] [Step 4] Verification error, assuming selected")
                         acc_selected = True
                     break
                 else:
-                    print(f"   [Step 4] No suitable account element found in attempt {attempt+1}")
+                    print(f"   [{self.target_username}] [Step 4] No suitable account element found in attempt {attempt+1}")
                     time.sleep(1)
             except Exception as e:
-                print(f"   [Step 4] Attempt {attempt+1} failed: {e}")
+                print(f"   [{self.target_username}] [Step 4] Attempt {attempt+1} failed: {e}")
                 time.sleep(1)
         if not acc_selected: 
-            print("   [Step 4] Warning: Select Account failed (May already be inside).")
+            print(f"   [{self.target_username}] [Step 4] Warning: Select Account failed (May already be inside).")
             return False
         return acc_selected
 
@@ -548,22 +558,22 @@ class Instagram2FAStep:
         except: return 'UNKNOWN'
 
     def _solve_internal_checkpoint(self, gmx_user, gmx_pass, target_ig_username):
-        print(f"   [Step 4] Solving Internal Checkpoint for {target_ig_username}...")
+        print(f"   [{self.target_username}] [Step 4] Solving Internal Checkpoint for {target_ig_username}...")
         checkpoint_passed = False
         start_time = time.time()
         max_duration = 120  # Timeout tổng 120s để tránh treo
         
-        for mail_attempt in range(1, 4):
+        for mail_attempt in range(1, 2):
             if time.time() - start_time > max_duration:
                 raise Exception("STOP_FLOW_2FA: Checkpoint timeout after 120s")
             
-            print(f"   [Step 4] Mail Retrieval Attempt {mail_attempt}/3...")
+            print(f"   [{self.target_username}] [Step 4] Mail Retrieval Attempt {mail_attempt}/1...")
             code = get_2fa_code_v2(gmx_user, gmx_pass, target_ig_username)
             
             if not code:
                 if self._get_page_state() in ['SELECT_APP', 'ALREADY_ON']: 
                     checkpoint_passed = True; break
-                print("   [Step 4] Code not found. Clicking 'Get new code'...")
+                print(f"   [{self.target_username}] [Step 4] Code not found. Clicking 'Get new code'...")
                 self.driver.execute_script("var a=document.querySelectorAll('span, div[role=\"button\"]'); for(var e of a){if(e.innerText.toLowerCase().includes('get a new code')){e.click();break;}}")
                 # Poll for new code (giảm xuống 2 lần)
                 for poll in range(2):
@@ -571,15 +581,15 @@ class Instagram2FAStep:
                     code = get_2fa_code_v2(gmx_user, gmx_pass, target_ig_username)
                     if code: break
                 if not code:
-                    print("   [Step 4] Still no code after polling. Continuing to next attempt...")
+                    print(f"   [{self.target_username}] [Step 4] Still no code after polling. Continuing to next attempt...")
                     continue 
 
-            print(f"   [Step 4] Inputting Code: {code}")
+            print(f"   [{self.target_username}] [Step 4] Inputting Code: {code}")
             if self._robust_fill_input(code):
                 self._click_continue_robust()
                 time.sleep(1)  # Chờ UI update sau click
                 is_wrong_code = False
-                print("   [Step 4] Verifying...")
+                print(f"   [{self.target_username}] [Step 4] Verifying...")
                 time.sleep(1.5)  # Giảm xuống 1.5s
 
                 verify_attempts = 0
@@ -633,7 +643,7 @@ class Instagram2FAStep:
 
     def _select_auth_app_method(self, current_state):
         if self._get_page_state() == 'ALREADY_ON': return
-        print("   [Step 4] Selecting authentication app method...")
+        print(f"   [{self.target_username}] [Step 4] Selecting authentication app method...")
         result = self.driver.execute_script("""
             var els = document.querySelectorAll("div[role='button'], label");
             for (var i=0; i<els.length; i++) {
@@ -646,18 +656,18 @@ class Instagram2FAStep:
             return false;
         """)
         if result:
-            print("   [Step 4] Clicked on authentication app option.")
+            print(f"   [{self.target_username}] [Step 4] Clicked on authentication app option.")
         else:
-            print("   [Step 4] Authentication app option not found.")
+            print(f"   [{self.target_username}] [Step 4] Authentication app option not found.")
         self._click_continue_robust()
         wait_dom_ready(self.driver, timeout=10)  # Wait for page to load after clicking
         poll_end = time.time() + 60  # Increased from 30 to 60 to wait longer for QR code to load
         while time.time() < poll_end:
             state = self._get_page_state()
-            print(f"   [Step 4] Polling page state: {state}")
+            print(f"   [{self.target_username}] [Step 4] Polling page state: {state}")
             if state == 'ALREADY_ON': return
             if len(self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Copy key') or contains(text(), 'Sao chép') or contains(text(), 'Copy') or contains(text(), 'Sao')]") ) > 0: 
-                print("   [Step 4] Copy key button detected.")
+                print(f"   [{self.target_username}] [Step 4] Copy key button detected.")
                 time.sleep(5)  # Additional wait after button appears
                 return
             time.sleep(1)
@@ -666,19 +676,19 @@ class Instagram2FAStep:
         """Lấy Secret Key (Có logic Anti-Freeze: Thoát nếu lỗi trang)."""
         max_attempts = 10
         for attempt in range(1, max_attempts + 1):
-            print(f"   [Step 4] Attempt {attempt}/{max_attempts}: Starting secret key extraction...")
+            print(f"   [{self.target_username}] [Step 4] Attempt {attempt}/{max_attempts}: Starting secret key extraction...")
             secret_key = ""
             end_wait = time.time() + 120  # Increased from 80 to 120 to wait longer
             while time.time() < end_wait:
                 try:
                     # [ANTI-FREEZE Check]
                     current_state = self._get_page_state() # Check nhanh bằng JS
-                    print(f"   [Step 4] Current page state: {current_state}")
+                    print(f"   [{self.target_username}] [Step 4] Current page state: {current_state}")
                     if current_state == 'BROKEN' or current_state == 'SUSPENDED':
                          raise Exception("STOP_FLOW_2FA: Page Broken/Suspended while waiting for key")
                     if "two_factor" not in self.driver.current_url and "challenge" not in self.driver.current_url:
                          raise Exception("STOP_FLOW_2FA: Redirected away from 2FA page")
-                    if current_state == 'ALREADY_ON': return "ALREADY_2FA_ON"
+                    if current_state == 'ALREADY_ON': raise Exception("STOP_FLOW_2FA: ALREADY_ON")
 
                     # Try to extract secret from otpauth URL first
                     try:
@@ -705,17 +715,17 @@ class Instagram2FAStep:
                                 if len(raw_key) >= 16 and re.match(r'^[A-Z2-7]+$', raw_key):
                                     if ig_username.lower() not in raw_key.lower():
                                         secret_key = raw_key
-                                        print(f"   [Step 4] Extracted from otpauth: {raw_key}")
+                                        print(f"   [{self.target_username}] [Step 4] Extracted from otpauth: {raw_key}")
                                         break
                     except Exception as e:
-                        print(f"   [Step 4] Otpauth extraction failed: {e}")
+                        print(f"   [{self.target_username}] [Step 4] Otpauth extraction failed: {e}")
 
                     # Kiểm tra sự xuất hiện của "Copy key" button trước khi extract
                     copy_key_buttons = self.driver.find_elements(By.CSS_SELECTOR, 'div[role="button"]')
                     has_copy_key = any('Copy key' in btn.text or 'Sao chép' in btn.text or 'Copy' in btn.text or 'Sao' in btn.text for btn in copy_key_buttons)
                     
                     if has_copy_key:
-                        print("   [Step 4] Copy key button found, attempting extraction...")
+                        print(f"   [{self.target_username}] [Step 4] Copy key button found, attempting extraction...")
                         # Click "Copy key" button để copy vào clipboard
                         try:
                             copy_button = next(btn for btn in copy_key_buttons if 'Copy key' in btn.text or 'Sao chép' in btn.text or 'Copy' in btn.text or 'Sao' in btn.text)
@@ -727,42 +737,42 @@ class Instagram2FAStep:
                             self.driver.execute_script("arguments[0].click();", copy_button)
                             time.sleep(1.0)  # Tăng delay để chờ copy hoàn tất
                             raw_key = pyperclip.paste().replace(" ", "").strip()
-                            print(f"   [Step 4] Copied from clipboard: {raw_key}")
+                            print(f"   [{self.target_username}] [Step 4] Copied from clipboard: {raw_key}")
                             if len(raw_key) >= 16 and re.match(r'^[A-Z2-7]+$', raw_key):
                                 # Skip if it contains the username (case insensitive)
                                 if ig_username.lower() in raw_key.lower():
-                                    print(f"   [Step 4] Skipped potential key containing username: {raw_key}")
+                                    print(f"   [{self.target_username}] [Step 4] Skipped potential key containing username: {raw_key}")
                                     continue
                                 secret_key = raw_key
                                 break
                             else:
-                                print(f"   [Step 4] Invalid key from clipboard: {raw_key}")
+                                print(f"   [{self.target_username}] [Step 4] Invalid key from clipboard: {raw_key}")
                         except Exception as e:
-                            print(f"   [Step 4] Error clicking Copy key or getting from clipboard: {e}")
+                            print(f"   [{self.target_username}] [Step 4] Error clicking Copy key or getting from clipboard: {e}")
                             # Fallback: Lấy trực tiếp từ span element
                             try:
                                 secret_span = self.driver.find_element(By.CSS_SELECTOR, 'span[class*="x1lliihq"]')
                                 self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'instant', block: 'center'});", secret_span)
                                 time.sleep(0.5)
                                 raw_key = secret_span.text.replace(" ", "").strip()
-                                print(f"   [Step 4] Fallback extracted from span: {raw_key}")
+                                print(f"   [{self.target_username}] [Step 4] Fallback extracted from span: {raw_key}")
                                 if len(raw_key) >= 16 and re.match(r'^[A-Z2-7]+$', raw_key):
                                     if ig_username.lower() in raw_key.lower():
-                                        print(f"   [Step 4] Skipped potential key from span: {raw_key}")
+                                        print(f"   [{self.target_username}] [Step 4] Skipped potential key from span: {raw_key}")
                                         continue
                                     secret_key = raw_key
                                     break
                                 else:
-                                    print(f"   [Step 4] Invalid key from span: {raw_key}")
+                                    print(f"   [{self.target_username}] [Step 4] Invalid key from span: {raw_key}")
                             except Exception as e2:
-                                print(f"   [Step 4] Fallback span extraction failed: {e2}")
+                                print(f"   [{self.target_username}] [Step 4] Fallback span extraction failed: {e2}")
                     else:
-                        print("   [Step 4] 'Copy key' button not detected. Waiting...")
+                        print(f"   [{self.target_username}] [Step 4] 'Copy key' button not detected. Waiting...")
                         # Nếu chưa có "Copy key", tiếp tục chờ
                         continue
 
                     if current_state == 'OTP_INPUT_SCREEN' and not secret_key:
-                        print("   [Step 4] Warning: Skiped to OTP screen! Clicking Back...")
+                        print(f"   [{self.target_username}] [Step 4] Warning: Skiped to OTP screen! Clicking Back...")
                         self.driver.execute_script("var b = document.querySelector('div[role=\"button\"] svg'); if(b) b.closest('div[role=\"button\"]').click();")
                         time.sleep(1); continue
 
@@ -775,7 +785,7 @@ class Instagram2FAStep:
                             if len(clean) >= 16:
                                 # Skip if it contains the username (case insensitive)
                                 if clean.lower()  in  ig_username.lower():
-                                    print(f"   [Step 4] Skipped potential key containing username: {clean}")
+                                    print(f"   [{self.target_username}] [Step 4] Skipped potential key containing username: {clean}")
                                     continue
                                 secret_key = clean; break
 
@@ -797,7 +807,9 @@ class Instagram2FAStep:
                     pass
                 time.sleep(1)  # Poll every 1s to avoid skipping too fast
 
-            if secret_key: return secret_key
+            if secret_key: 
+                formatted_key = self.format_key_groups(secret_key)
+                return formatted_key
             else:
                 print(f"   [Step 4] Secret Key NOT found! Attempt {attempt}/{max_attempts}.")
                 time.sleep(2)

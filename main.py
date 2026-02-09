@@ -55,7 +55,8 @@ def process_account(line_data):
             driver = get_driver(headless=True) 
             
             # 2. Login Instagram
-            if login_instagram_via_cookie(driver, cookie_str):
+            login_success, login_status = login_instagram_via_cookie(driver, cookie_str, username=username)
+            if login_success:
                 
                 # 3. Setup 2FA & Get Key (Step 4)
                 print(Fore.CYAN + f"[{username}] Step 4: Setting up 2FA...")
@@ -63,15 +64,52 @@ def process_account(line_data):
                 instagram_2fa = Instagram2FAStep(driver)
                 secret_key = instagram_2fa.setup_2fa(email_user, email_pass, target_username=username)
                 
-                # 4. Success
-                result_to_save = secret_key
-                print(Fore.GREEN + f"[{username}] SUCCESS! Key: {secret_key}")
+                if secret_key.startswith("FAIL:"):
+                    # Update NOTE column for all FAIL errors
+                    while len(parts) <= 12: parts.append("")
+                    parts[12] = secret_key.replace("FAIL: ", "")  # Remove prefix for cleaner note
+                    result_to_save = None  # Explicitly set None to avoid writing to IG2FA
+                    print(Fore.YELLOW + f"[{username}] 2FA setup failed: {secret_key}. Updated NOTE.")
+                else:
+                    # 4. Success
+                    result_to_save = secret_key
+                    print(Fore.GREEN + f"[{username}] SUCCESS! Key: {secret_key}")
                 
                 if driver: 
                     try: driver.quit()
                     except: pass
                 driver = None
                 break 
+            
+            else:
+                # Handle login failure
+                if login_status == "ALREADY_ON":
+                    # Update NOTE column (assume index 12)
+                    while len(parts) <= 12: parts.append("")
+                    parts[12] = "ALREADY_ON"
+                    result_to_save = None  # Explicitly set None
+                    print(Fore.YELLOW + f"[{username}] 2FA already enabled. Updated NOTE.")
+                    
+                    if driver: 
+                        try: driver.quit()
+                        except: pass
+                    driver = None
+                    break # Stop retrying for ALREADY_ON
+                else:
+                    result_to_save = f"LOGIN_FAIL: {login_status}"
+                    print(Fore.RED + f"[{username}] Login failed: {login_status}")
+                
+                    if driver: 
+                        try: driver.quit()
+                        except: pass
+                    driver = None
+                    
+                    # Retry logic: Only break if max retries reached
+                    if attempt < MAX_RETRIES:
+                        print(Fore.YELLOW + f"[{username}] Retrying... ({attempt}/{MAX_RETRIES})")
+                        continue
+                    else:
+                        break 
 
         except Exception as e:
             print(Fore.RED + f"[{username}] Error attempt {attempt}: {str(e)}")
@@ -86,18 +124,14 @@ def process_account(line_data):
                 print(Fore.RED + f"[{username}] => CONFIRMED FAILURE.")
     
     # --- OUTPUT WRITING ---
-    if not result_to_save:
-            result_to_save = "UNKNOWN_ERROR"
-
-    # Ghi kết quả vào cột IG2FA (Index 5) theo yêu cầu hoặc ghi vào cột riêng?
-    # Thường tool sẽ update lại vào file. 
-    # Input mẫu: UID[0] ... IG2FA[5] ...
-    # Ta sẽ ghi đè kết quả vào cột IG2FA (parts[5])
+    # Logic: Only write to parts[5] if we have a valid result (Success Key or specific Login Fail that isn't handled elsewhere)
+    # If result_to_save is None (e.g. handled as NOTE), do not overwrite parts[5].
     
-    # Ensure list size
-    while len(parts) <= 5: parts.append("")
+    if result_to_save:
+        parts[5] = result_to_save
     
-    parts[5] = result_to_save # Save Key to IG2FA column
+    # Ensure parts[12] (NOTE) exists if we accessed it earlier
+    while len(parts) <= 12: parts.append("")
     
     final_line = "\t".join(parts) + "\n"
     

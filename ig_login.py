@@ -67,12 +67,12 @@ class InstagramLoginStep:
             return False
 
     def _wait_for_login_result(self, timeout=120):
-        print("   [Status Check] Waiting for login result...")
+        print(f"   [{self.username}] [Status Check] Waiting for login result...")
         end_time = time.time() + timeout
         
         while time.time() < end_time:
             status = self._detect_initial_status()
-            print(f"   [Status Check] Intermediate login status: {status}")
+            print(f"   [{self.username}] [Status Check] Intermediate login status: {status}")
             
             if status == "FAIL_LOGIN_REDIRECTED_TO_PROFILE_SELECTION":
                 if self.password:
@@ -106,12 +106,12 @@ class InstagramLoginStep:
             except Exception as e:
                 error_str = str(e).lower()
                 if "stale" in error_str or "element" in error_str and "reference" in error_str:
-                    print("   [Status Check] Stale element when getting body text, retrying...")
+                    print(f"   [{self.username}] [Status Check] Stale element when getting body text, retrying...")
                     time.sleep(1)
                     try:
                         body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
                     except Exception as e2:
-                        print("   [Status Check] Stale element retry also failed, returning unknown state")
+                        print(f"   [{self.username}] [Status Check] Stale element retry also failed, returning unknown state")
                         return "LOGGED_IN_UNKNOWN_STATE"
                 else:
                     return f"ERROR_DETECT: {str(e)}"
@@ -182,7 +182,7 @@ class InstagramLoginStep:
                     except Exception as e:
                         error_str = str(e).lower()
                         if "stale" in error_str or ("element" in error_str and "reference" in error_str):
-                            print("   [Status Check] Stale element in status check loop, retrying...")
+                            print(f"   [{self.username}] [Status Check] Stale element in status check loop, retrying...")
                             time.sleep(1)
                             continue
                         else:
@@ -335,16 +335,16 @@ class InstagramLoginStep:
 
     def _handle_profile_selection_login(self):
         try:
-            print("   [Step 1] Handling profile selection login...")
+            print(f"   [{self.username}] [Step 1] Handling profile selection login...")
             # Click "Log into Instagram" or "Continue"
             login_button = wait_element(self.driver, By.XPATH, "//*[contains(text(), 'Log into Instagram')]", timeout=10)
             wait_and_click(self.driver, login_button)
             # Wait for password input
             password_input = wait_element(self.driver, By.CSS_SELECTOR, "input[type='password']", timeout=10)
             wait_and_send_keys(self.driver, password_input, self.password + Keys.RETURN)
-            print("   [Step 1] Entered password and submitted.")
+            print(f"   [{self.username}] [Step 1] Entered password and submitted.")
         except Exception as e:
-            print(f"   [Step 1] Failed to handle profile selection login: {e}")
+            print(f"   [{self.username}] [Step 1] Failed to handle profile selection login: {e}")
             raise
 
     def _handle_interruptions(self):
@@ -925,28 +925,22 @@ def login_instagram_via_cookie(driver, cookie_str, username=None, password=None)
     login_step = InstagramLoginStep(driver, username, password)
 
     # Step 1: Load cookies from string
-    print("   [Step 1] Loading cookies and checking login status...")
+    print(f"   [{username}] [Step 1] Loading cookies and checking login status...")
     if not login_step.load_cookies_from_string(cookie_str):
         return False, "COOKIE_FORMAT_ERROR"
 
     # Step 2: Navigate to 2FA setup page to verify login
-    print("   [Step 2] Navigating to 2FA setup page...")
+    print(f"   [{username}] [Step 2] Navigating to 2FA setup page...")
     driver.get(login_step.two_fa_url)
     wait_dom_ready(driver, timeout=10)
     time.sleep(3)
 
-    # Step 3: Check login status
-    print("   [Step 3] Checking login status...")
-    print("   [Status Check] Starting login verification...")
-    status = login_step._wait_for_login_result(timeout=60)
-    print(f"   [Status Check] Final login status: {status}")
-
-    if status == "LOGGED_IN_SUCCESS":
-        print("   [Step 4] Login successful - checking for post-login popups...")
-        # Handle any post-login popups
-        login_step._handle_interruptions()
-        print("   [Step 5] Ready for 2FA setup...")
+    # Step 3: Check if successfully loaded into 2FA page
+    current_url = driver.current_url.lower()
+    if "two_factor" in current_url and "accounts/login" not in current_url:
+        print(f"   [{username}] [Step 3] Successfully loaded 2FA page. Login successful.")
+        print(f"   [{username}] [Step 4] Ready for 2FA setup...")
         return True, "SUCCESS"
     else:
-        print(f"   [Login Failed] Status: {status}")
-        return False, status
+        print(f"   [{username}] [Step 3] Failed to load 2FA page. Current URL: {current_url}")
+        return False, "LOGIN_FAILED"

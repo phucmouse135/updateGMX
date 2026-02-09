@@ -288,15 +288,24 @@ class AutomationToolGUI:
                             result = f"ERROR_EXCEPTION: {str(e)}"
                         
                         # Xử lý kết quả 2FA và Ghi NOTE
-                        if result == "ALREADY_2FA_ON":
-                            status, note, final_key = "Success", "Done: skip", "Already On"
-                        elif str(result).startswith("ERROR") or "Exception" in str(result):
+                        if str(result).startswith("FAIL:") or str(result).startswith("ERROR"):
                             status = "Fail"
-                            raw_err = str(result).replace("ERROR_2FA:", "").replace("STOP_FLOW_2FA:", "").strip()
-                            note = f"{raw_err} {time.time() - start_time:.1f}s"  # Hiển thị chính xác mã lỗi + thời gian
+                            # Lấy nội dung lỗi (bỏ prefix)
+                            raw_err = str(result).replace("FAIL: ", "").replace("ERROR_2FA: ", "").replace("STOP_FLOW_2FA:", "").strip()
+                            note = f"{raw_err} {time.time() - start_time:.1f}s"
+                            # [FIX] Đảm bảo không ghi lỗi vào cột key (index 4 trong row_data tương ứng column 2FA)
+                            # Cột 2FA trong row_data là row_data[4] (0:UID, 1:LINK, 2:USER, 3:PASS, 4:2FA...)
+                            # Không gán giá trị gì vào row_data[4] khi fail
+                        elif result == "ALREADY_2FA_ON":
+                             status, note, final_key = "Success", "Done: skip", "Already On" 
+                             # Ở đây có thể người dùng muốn ghi Already On vào cột 2FA hoặc Note?
+                             # Theo yêu cầu "FAIL: ALREADY_ON" -> Note. 
+                             # Nếu logic trả về "ALREADY_2FA_ON" (logic cũ) thì sửa thành Fail tương tự
+                             status = "Fail"
+                             note = f"ALREADY_ON {time.time() - start_time:.1f}s"
                         else:
                             status, note, final_key = "Success", f"Done {time.time() - start_time:.1f}s", result
-                            row_data[4] = final_key 
+                            row_data[4] = final_key # CHỈ GHI VÀO CỘT 2FA KHI THÀNH CÔNG (CÓ KEY) 
                     else:
                         # Xử lý lỗi Login và Ghi NOTE
                         status = "Fail"
